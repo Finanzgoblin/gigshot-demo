@@ -1,0 +1,1063 @@
+{
+ "creators": [
+  {
+   "id": "00000000-0000-4000-8000-0000000000c1",
+   "handle": "lenavogel",
+   "name": "Lena Vogel",
+   "emoji": "🎥",
+   "type": "videographer",
+   "typeLabel": "Videographer",
+   "city": "Berlin",
+   "country": "Germany",
+   "rateCents": 35000,
+   "rateUnit": "per set",
+   "currency": "EUR",
+   "rating": 4.97,
+   "reviewCount": 84,
+   "verified": true,
+   "pro": true,
+   "responseRate": 98,
+   "responseLabel": "~1 hr",
+   "gigsShot": 112,
+   "memberSince": "2024",
+   "bio": "Club & festival videographer. 8 years shooting Berlin nightlife — Berghain side rooms to open-air festivals. I deliver a 60-second recap edit within 48h and full set coverage within a week.",
+   "gear": [
+    "Sony FX3 + FX30 (B-cam)",
+    "DJI RS4 gimbal",
+    "Sigma 18-35 f1.8",
+    "Atmos audio rig"
+   ],
+   "specialties": [
+    "Club sets",
+    "Festival recaps",
+    "Aftermovies",
+    "Vertical edits"
+   ],
+   "portfolio": [
+    {
+     "title": "Warehouse rave recap",
+     "url": "https://lenavogel.video/work/warehouse-rave-recap"
+    },
+    {
+     "title": "Rooftop sunset set",
+     "url": "https://www.instagram.com/p/C9rQk2XMb1T/"
+    },
+    {
+     "title": "Festival mainstage"
+    },
+    {
+     "title": "Boiler-room style"
+    },
+    {
+     "title": "Artist tour vlog"
+    },
+    {
+     "title": "Label showcase"
+    }
+   ],
+   "scores": {
+    "quality": 5,
+    "communication": 4.9,
+    "punctuality": 5,
+    "value": 4.9
+   },
+   "socials": {
+    "instagram": "lena.shoots.berlin",
+    "tiktok": "lenashoots",
+    "website": "https://lenavogel.video"
+   },
+   "location": {
+    "lat": 52.5105,
+    "lng": 13.443
+   },
+   "windows": [
+    {
+     "city": "Ibiza",
+     "country": "Spain",
+     "lat": 38.9067,
+     "lng": 1.4206,
+     "startsOn": "2026-07-15",
+     "endsOn": "2026-08-30",
+     "note": "Festival season residency"
+    },
+    {
+     "city": "Bangkok",
+     "country": "Thailand",
+     "lat": 13.7563,
+     "lng": 100.5018,
+     "startsOn": "2026-11-10",
+     "endsOn": "2026-11-24",
+     "note": "Asia tour leg — taking club bookings"
+    }
+   ],
+   "reviews": [
+    {
+     "id": "r1",
+     "reviewerId": "00000000-0000-4000-8000-0000000000a1",
+     "reviewerName": "DJ Nova",
+     "reviewerEmoji": "🎧",
+     "stars": 5,
+     "gigLabel": "Sisyphos, Berlin · May 2026",
+     "body": "Lena was incredible. Showed up early, scouted the booth angles before doors, and the recap edit was in my inbox before I’d even flown home."
+    },
+    {
+     "id": "r2",
+     "reviewerId": "00000000-0000-4000-8000-0000000000a2",
+     "reviewerName": "KARLA B2B SET",
+     "reviewerEmoji": "🎛️",
+     "stars": 5,
+     "gigLabel": "RSO Berlin · Apr 2026",
+     "body": "Understands club lighting like nobody else. Zero flash, zero crowd disruption, footage looks like a movie."
+    },
+    {
+     "id": "r3",
+     "reviewerId": "00000000-0000-4000-8000-0000000000a3",
+     "reviewerName": "Moodtrap",
+     "reviewerEmoji": "🎹",
+     "stars": 4,
+     "gigLabel": "Private label night · Mar 2026",
+     "body": "Great footage and fast delivery. Vertical crops needed one revision round, turned around same-day."
+    }
+   ]
+  },
+  {
+   "id": "00000000-0000-4000-8000-0000000000c2",
+   "handle": "marcoreyes",
+   "name": "Marco Reyes",
+   "emoji": "📸",
+   "type": "photographer",
+   "typeLabel": "Photographer",
+   "city": "Barcelona",
+   "country": "Spain",
+   "rateCents": 22000,
+   "rateUnit": "per set",
+   "currency": "EUR",
+   "rating": 4.89,
+   "reviewCount": 61,
+   "verified": true,
+   "pro": true,
+   "responseRate": 95,
+   "responseLabel": "~2 hrs",
+   "gigsShot": 89,
+   "memberSince": "2024",
+   "bio": "Music photographer based in Barcelona. Resident shooter for two clubs in Poble-sec, regular at Sónar week events. I shoot press-kit quality stills — the kind agencies actually use.",
+   "gear": [
+    "Canon R6 II",
+    "RF 28-70 f2",
+    "RF 85 f1.2",
+    "Profoto A2 (when allowed)"
+   ],
+   "specialties": [
+    "Press photos",
+    "Booth portraits",
+    "Crowd energy shots",
+    "Backstage documentary"
+   ],
+   "portfolio": [
+    {
+     "title": "Sónar week showcase",
+     "url": "https://marcoreyes.es/sonar-week"
+    },
+    {
+     "title": "Razzmatazz main room"
+    },
+    {
+     "title": "Beach club sunset"
+    },
+    {
+     "title": "Backstage series"
+    },
+    {
+     "title": "Press kit shoot",
+     "url": "https://marcoreyes.es/press-kits"
+    },
+    {
+     "title": "Festival pit"
+    }
+   ],
+   "scores": {
+    "quality": 4.9,
+    "communication": 4.8,
+    "punctuality": 4.9,
+    "value": 4.9
+   },
+   "socials": {
+    "instagram": "marcoreyes.foto",
+    "website": "https://marcoreyes.es"
+   },
+   "location": {
+    "lat": 41.372,
+    "lng": 2.162
+   },
+   "windows": [
+    {
+     "city": "Berlin",
+     "country": "Germany",
+     "lat": 52.52,
+     "lng": 13.405,
+     "startsOn": "2026-06-20",
+     "endsOn": "2026-06-27",
+     "note": "Shooting trip"
+    }
+   ],
+   "reviews": [
+    {
+     "id": "r4",
+     "reviewerId": "00000000-0000-4000-8000-0000000000a1",
+     "reviewerName": "DJ Nova",
+     "reviewerEmoji": "🎧",
+     "stars": 5,
+     "gigLabel": "Nitsa, Barcelona · Feb 2026",
+     "body": "My booking agency replaced my entire press kit with Marco’s shots. That says everything."
+    },
+    {
+     "id": "r5",
+     "reviewerId": "00000000-0000-4000-8000-0000000000a4",
+     "reviewerName": "Selva",
+     "reviewerEmoji": "🌴",
+     "stars": 5,
+     "gigLabel": "Apolo, Barcelona · Jan 2026",
+     "body": "Fast, invisible during the set, and the edit selection he sent was already curated."
+    }
+   ]
+  },
+  {
+   "id": "00000000-0000-4000-8000-0000000000c3",
+   "handle": "amaraokafor",
+   "name": "Amara Okafor",
+   "emoji": "🚁",
+   "type": "drone",
+   "typeLabel": "Drone + Video",
+   "city": "Amsterdam",
+   "country": "Netherlands",
+   "rateCents": 48000,
+   "rateUnit": "per event",
+   "currency": "EUR",
+   "rating": 4.95,
+   "reviewCount": 43,
+   "verified": true,
+   "pro": false,
+   "responseRate": 92,
+   "responseLabel": "~3 hrs",
+   "gigsShot": 57,
+   "memberSince": "2025",
+   "bio": "Licensed drone operator (EU A2 cert) + ground videographer. Festival aftermovies are my specialty — aerial establishing shots cut with ground-level energy. Fully insured.",
+   "gear": [
+    "DJI Mavic 4 Pro",
+    "Sony A7S III",
+    "EU A2 drone license",
+    "€2M liability insurance"
+   ],
+   "specialties": [
+    "Festival aftermovies",
+    "Aerial venue shots",
+    "Open-air events",
+    "Sponsor deliverables"
+   ],
+   "portfolio": [
+    {
+     "title": "Festival aerial open",
+     "url": "https://amaraokafor.nl/reel/festival-aerial-open"
+    },
+    {
+     "title": "Canal stage flyover"
+    },
+    {
+     "title": "Sunrise closing set"
+    },
+    {
+     "title": "Crowd wave aerial"
+    },
+    {
+     "title": "Venue reveal shot"
+    },
+    {
+     "title": "Sponsor cutdown"
+    }
+   ],
+   "scores": {
+    "quality": 5,
+    "communication": 4.9,
+    "punctuality": 4.9,
+    "value": 4.8
+   },
+   "socials": {
+    "instagram": "amara.aerial",
+    "tiktok": "amara.aerial",
+    "website": "https://amaraokafor.nl"
+   },
+   "location": {
+    "lat": 52.384,
+    "lng": 4.902
+   },
+   "windows": [
+    {
+     "city": "Lisbon",
+     "country": "Portugal",
+     "lat": 38.7223,
+     "lng": -9.1393,
+     "startsOn": "2026-09-05",
+     "endsOn": "2026-09-15",
+     "note": "Open-air season"
+    }
+   ],
+   "reviews": [
+    {
+     "id": "r6",
+     "reviewerId": "00000000-0000-4000-8000-0000000000a3",
+     "reviewerName": "Moodtrap",
+     "reviewerEmoji": "🎹",
+     "stars": 5,
+     "gigLabel": "Open-air, Amsterdam Noord · May 2026",
+     "body": "The aerial open of her aftermovie got us 2M views. Worth every cent, and she handled all the flight permits herself."
+    }
+   ]
+  },
+  {
+   "id": "00000000-0000-4000-8000-0000000000c4",
+   "handle": "tomhartley",
+   "name": "Tom Hartley",
+   "emoji": "🎬",
+   "type": "videographer",
+   "typeLabel": "Videographer",
+   "city": "London",
+   "country": "UK",
+   "rateCents": 30000,
+   "rateUnit": "per set",
+   "currency": "EUR",
+   "rating": 4.76,
+   "reviewCount": 52,
+   "verified": true,
+   "pro": false,
+   "responseRate": 88,
+   "responseLabel": "~5 hrs",
+   "gigsShot": 71,
+   "memberSince": "2024",
+   "bio": "London-based videographer covering club nights, label parties and intimate venue sessions. Fast turnaround on social-first edits — vertical cuts delivered within 24 hours.",
+   "gear": [
+    "Sony FX30",
+    "DJI Pocket 3 (B-roll)",
+    "Sigma 16mm f1.4"
+   ],
+   "specialties": [
+    "Vertical-first edits",
+    "Club nights",
+    "Label parties",
+    "Recap reels"
+   ],
+   "portfolio": [
+    {
+     "title": "Fabric room 2",
+     "url": "https://www.instagram.com/p/C7mXw9aNkPb/"
+    },
+    {
+     "title": "East London warehouse"
+    },
+    {
+     "title": "Label night recap"
+    },
+    {
+     "title": "Rooftop day party"
+    },
+    {
+     "title": "Vinyl bar session"
+    },
+    {
+     "title": "NYE countdown"
+    }
+   ],
+   "scores": {
+    "quality": 4.8,
+    "communication": 4.6,
+    "punctuality": 4.8,
+    "value": 4.8
+   },
+   "socials": {
+    "instagram": "tomhartley.video",
+    "tiktok": "tomhartley.video"
+   },
+   "location": {
+    "lat": 51.545,
+    "lng": -0.056
+   },
+   "windows": [],
+   "reviews": [
+    {
+     "id": "r7",
+     "reviewerId": "00000000-0000-4000-8000-0000000000a2",
+     "reviewerName": "KARLA B2B SET",
+     "reviewerEmoji": "🎛️",
+     "stars": 5,
+     "gigLabel": "Phonox, London · Apr 2026",
+     "body": "24h turnaround as promised. The vertical edit performed better than anything my own team has cut."
+    },
+    {
+     "id": "r8",
+     "reviewerId": "00000000-0000-4000-8000-0000000000a1",
+     "reviewerName": "DJ Nova",
+     "reviewerEmoji": "🎧",
+     "stars": 4,
+     "gigLabel": "Corsica Studios · Mar 2026",
+     "body": "Solid footage, good vibe. Communication before the gig was a bit slow but on the night he was flawless."
+    }
+   ]
+  },
+  {
+   "id": "00000000-0000-4000-8000-0000000000c5",
+   "handle": "yukitanaka",
+   "name": "Yuki Tanaka",
+   "emoji": "📷",
+   "type": "photographer",
+   "typeLabel": "Photographer",
+   "city": "Berlin",
+   "country": "Germany",
+   "rateCents": 18000,
+   "rateUnit": "per set",
+   "currency": "EUR",
+   "rating": 4.92,
+   "reviewCount": 38,
+   "verified": true,
+   "pro": false,
+   "responseRate": 97,
+   "responseLabel": "~1 hr",
+   "gigsShot": 45,
+   "memberSince": "2025",
+   "bio": "Analog + digital hybrid photographer. I shoot a roll of 35mm film alongside digital at every gig — artists love the film scans for album art and posters.",
+   "gear": [
+    "Fujifilm X-T5",
+    "Contax T2 (35mm film)",
+    "XF 23mm f1.4"
+   ],
+   "specialties": [
+    "Film photography",
+    "Poster-grade stills",
+    "Intimate venues",
+    "Album art"
+   ],
+   "portfolio": [
+    {
+     "title": "35mm club series",
+     "url": "https://yukitanaka.photo/series/35mm-club"
+    },
+    {
+     "title": "Poster shoot"
+    },
+    {
+     "title": "Smoke + laser stills"
+    },
+    {
+     "title": "Green room set"
+    },
+    {
+     "title": "Crowd film grain"
+    },
+    {
+     "title": "Dawn afterparty"
+    }
+   ],
+   "scores": {
+    "quality": 5,
+    "communication": 4.9,
+    "punctuality": 4.8,
+    "value": 5
+   },
+   "socials": {
+    "instagram": "yuki.35mm",
+    "website": "https://yukitanaka.photo"
+   },
+   "location": {
+    "lat": 52.499,
+    "lng": 13.418
+   },
+   "windows": [],
+   "reviews": [
+    {
+     "id": "r9",
+     "reviewerId": "00000000-0000-4000-8000-0000000000a4",
+     "reviewerName": "Selva",
+     "reviewerEmoji": "🌴",
+     "stars": 5,
+     "gigLabel": "OHM, Berlin · May 2026",
+     "body": "The film scans became my next EP cover. Yuki has an eye you cannot teach."
+    }
+   ]
+  },
+  {
+   "id": "00000000-0000-4000-8000-0000000000c6",
+   "handle": "priyasharma",
+   "name": "Priya Sharma",
+   "emoji": "🎞️",
+   "type": "videographer",
+   "typeLabel": "Videographer",
+   "city": "New York",
+   "country": "USA",
+   "rateCents": 42000,
+   "rateUnit": "per set",
+   "currency": "EUR",
+   "rating": 4.85,
+   "reviewCount": 47,
+   "verified": true,
+   "pro": true,
+   "responseRate": 94,
+   "responseLabel": "~2 hrs",
+   "gigsShot": 66,
+   "memberSince": "2024",
+   "bio": "NYC nightlife videographer. Brooklyn warehouse scene regular. Multi-cam coverage with a second shooter available for bigger productions.",
+   "gear": [
+    "2x Sony FX3",
+    "Ronin 4D",
+    "Second shooter on request"
+   ],
+   "specialties": [
+    "Multi-cam sets",
+    "Warehouse parties",
+    "Live streams",
+    "Tour documentaries"
+   ],
+   "portfolio": [
+    {
+     "title": "Bushwick warehouse"
+    },
+    {
+     "title": "Multi-cam live stream",
+     "url": "https://priyasharma.nyc/work/multicam-live"
+    },
+    {
+     "title": "Tour doc episode",
+     "url": "https://www.instagram.com/p/C6pT2vRMxQ9/"
+    },
+    {
+     "title": "Rooftop golden hour"
+    },
+    {
+     "title": "Basskeeper takeover"
+    },
+    {
+     "title": "Loft session"
+    }
+   ],
+   "scores": {
+    "quality": 4.9,
+    "communication": 4.8,
+    "punctuality": 4.8,
+    "value": 4.7
+   },
+   "socials": {
+    "instagram": "priya.films.nyc",
+    "tiktok": "priyafilms",
+    "website": "https://priyasharma.nyc"
+   },
+   "location": {
+    "lat": 40.706,
+    "lng": -73.921
+   },
+   "windows": [
+    {
+     "city": "Berlin",
+     "country": "Germany",
+     "lat": 52.52,
+     "lng": 13.405,
+     "startsOn": "2026-08-01",
+     "endsOn": "2026-08-31",
+     "note": "Europe summer base"
+    }
+   ],
+   "reviews": [
+    {
+     "id": "r10",
+     "reviewerId": "00000000-0000-4000-8000-0000000000a3",
+     "reviewerName": "Moodtrap",
+     "reviewerEmoji": "🎹",
+     "stars": 5,
+     "gigLabel": "Elsewhere, Brooklyn · Apr 2026",
+     "body": "Multi-cam coverage made my livestream look like a Cercle set. Priya runs the whole thing solo."
+    }
+   ]
+  },
+  {
+   "id": "00000000-0000-4000-8000-0000000000c7",
+   "handle": "dries",
+   "name": "Dries Vermeulen",
+   "emoji": "📹",
+   "type": "drone",
+   "typeLabel": "Drone + Video",
+   "city": "Amsterdam",
+   "country": "Netherlands",
+   "rateCents": 26000,
+   "rateUnit": "per set",
+   "currency": "EUR",
+   "rating": 4.61,
+   "reviewCount": 19,
+   "verified": false,
+   "pro": false,
+   "responseRate": 81,
+   "responseLabel": "~8 hrs",
+   "gigsShot": 23,
+   "memberSince": "2026",
+   "bio": "Newer to the network but shooting events for 3 years. Affordable rates while I build my Gigshot reputation — same gear, hungrier edits.",
+   "gear": [
+    "Sony ZV-E1",
+    "DJI Mini 4 Pro"
+   ],
+   "specialties": [
+    "Budget-friendly recaps",
+    "Day parties",
+    "Small venues"
+   ],
+   "portfolio": [
+    {
+     "title": "Park day party"
+    },
+    {
+     "title": "Canal boat set",
+     "url": "https://www.instagram.com/p/C5kRm8wJtLn/"
+    },
+    {
+     "title": "Student night"
+    },
+    {
+     "title": "Bar takeover"
+    },
+    {
+     "title": "Sunset terrace"
+    },
+    {
+     "title": "Pop-up rave"
+    }
+   ],
+   "scores": {
+    "quality": 4.7,
+    "communication": 4.4,
+    "punctuality": 4.7,
+    "value": 4.9
+   },
+   "socials": {
+    "instagram": "dries.shoots"
+   },
+   "location": {
+    "lat": 52.355,
+    "lng": 4.892
+   },
+   "windows": [],
+   "reviews": [
+    {
+     "id": "r11",
+     "reviewerId": "00000000-0000-4000-8000-0000000000a4",
+     "reviewerName": "Selva",
+     "reviewerEmoji": "🌴",
+     "stars": 4,
+     "gigLabel": "Boat party, Amsterdam · May 2026",
+     "body": "Great value for the rate. Footage was strong; delivery took a few days longer than quoted."
+    }
+   ]
+  },
+  {
+   "id": "00000000-0000-4000-8000-0000000000c8",
+   "handle": "sofialind",
+   "name": "Sofia Lindqvist",
+   "emoji": "✨",
+   "type": "content",
+   "typeLabel": "Content Creator",
+   "city": "London",
+   "country": "UK",
+   "rateCents": 24000,
+   "rateUnit": "per set",
+   "currency": "EUR",
+   "rating": 4.94,
+   "reviewCount": 56,
+   "verified": true,
+   "pro": true,
+   "responseRate": 99,
+   "responseLabel": "~30 min",
+   "gigsShot": 78,
+   "memberSince": "2024",
+   "bio": "Social-first content specialist. I don’t just film your set — I run your stories live during the gig, capture fan content, and hand you a 7-day posting plan with edited assets.",
+   "gear": [
+    "iPhone 17 Pro rig",
+    "Sony A7C II",
+    "Wireless mic kit"
+   ],
+   "specialties": [
+    "Live story coverage",
+    "Fan content capture",
+    "Posting strategy",
+    "Trend-format edits"
+   ],
+   "portfolio": [
+    {
+     "title": "Story takeover",
+     "url": "https://sofialindqvist.co/case/story-takeover"
+    },
+    {
+     "title": "Fan cam compilation"
+    },
+    {
+     "title": "Trend edit pack",
+     "url": "https://sofialindqvist.co/case/trend-edit-pack"
+    },
+    {
+     "title": "Behind the decks"
+    },
+    {
+     "title": "Meet the crowd"
+    },
+    {
+     "title": "Tour content week"
+    }
+   ],
+   "scores": {
+    "quality": 4.9,
+    "communication": 5,
+    "punctuality": 4.9,
+    "value": 4.9
+   },
+   "socials": {
+    "instagram": "sofia.creates",
+    "tiktok": "sofia.creates",
+    "website": "https://sofialindqvist.co"
+   },
+   "location": {
+    "lat": 51.526,
+    "lng": -0.078
+   },
+   "windows": [
+    {
+     "city": "Tbilisi",
+     "country": "Georgia",
+     "lat": 41.7151,
+     "lng": 44.8271,
+     "startsOn": "2026-07-03",
+     "endsOn": "2026-07-10",
+     "note": "Bassiani week — content slots open"
+    }
+   ],
+   "reviews": [
+    {
+     "id": "r12",
+     "reviewerId": "00000000-0000-4000-8000-0000000000a1",
+     "reviewerName": "DJ Nova",
+     "reviewerEmoji": "🎧",
+     "stars": 5,
+     "gigLabel": "XOYO, London · May 2026",
+     "body": "Gained 4k followers the week after working with Sofia. She thinks like a manager, not just a camera."
+    },
+    {
+     "id": "r13",
+     "reviewerId": "00000000-0000-4000-8000-0000000000a2",
+     "reviewerName": "KARLA B2B SET",
+     "reviewerEmoji": "🎛️",
+     "stars": 5,
+     "gigLabel": "Village Underground · Feb 2026",
+     "body": "The 7-day posting plan alone is worth the rate. Everything pre-captioned, pre-cut, scheduled."
+    }
+   ]
+  }
+ ],
+ "artists": [
+  {
+   "id": "00000000-0000-4000-8000-0000000000a1",
+   "handle": "djnova",
+   "name": "DJ Nova",
+   "emoji": "🎧",
+   "genre": "Melodic Techno",
+   "base": "Berlin, Germany",
+   "plan": null,
+   "memberSince": "2024",
+   "gigsBooked": 31,
+   "rating": 4.93,
+   "reviewCount": 27,
+   "bio": "Melodic techno DJ touring across Europe. I book a local creator in every city I play — consistent content, zero logistics. My entire press kit and socials run on Gigshot creators.",
+   "socials": {
+    "instagram": "djnova.music",
+    "tiktok": "djnova.music",
+    "website": "https://djnova.live"
+   },
+   "windows": [
+    {
+     "city": "Bangkok",
+     "country": "Thailand",
+     "lat": 13.7563,
+     "lng": 100.5018,
+     "startsOn": "2026-11-12",
+     "endsOn": "2026-11-16",
+     "note": "Asia tour — two club dates"
+    }
+   ],
+   "upcoming": [
+    {
+     "date": "Jun 21",
+     "venue": "Sisyphos",
+     "city": "Berlin",
+     "status": "Creator booked — Lena V."
+    },
+    {
+     "date": "Jul 04",
+     "venue": "Nitsa",
+     "city": "Barcelona",
+     "status": "Creator booked — Marco R."
+    },
+    {
+     "date": "Jul 18",
+     "venue": "Elsewhere",
+     "city": "New York",
+     "status": "3 applicants — choosing"
+    }
+   ],
+   "reviews": [
+    {
+     "id": "ar1",
+     "reviewerId": "00000000-0000-4000-8000-0000000000c1",
+     "reviewerName": "Lena Vogel",
+     "reviewerEmoji": "🎥",
+     "stars": 5,
+     "gigLabel": "Sisyphos, Berlin · May 2026",
+     "body": "Dream client. Clear brief, guest-list sorted before I asked, paid the same night. Artists like Nova are why I’m on this platform."
+    },
+    {
+     "id": "ar2",
+     "reviewerId": "00000000-0000-4000-8000-0000000000c8",
+     "reviewerName": "Sofia Lindqvist",
+     "reviewerEmoji": "✨",
+     "stars": 5,
+     "gigLabel": "XOYO, London · May 2026",
+     "body": "Responsive, trusted my creative calls, credited me on every post. Would shoot for Nova anytime."
+    },
+    {
+     "id": "ar3",
+     "reviewerId": "00000000-0000-4000-8000-0000000000c4",
+     "reviewerName": "Tom Hartley",
+     "reviewerEmoji": "🎬",
+     "stars": 5,
+     "gigLabel": "Corsica Studios · Mar 2026",
+     "body": "Smooth booking, brief was detailed, venue access pre-arranged. Five stars."
+    }
+   ]
+  },
+  {
+   "id": "00000000-0000-4000-8000-0000000000a2",
+   "handle": "karlab2b",
+   "name": "KARLA B2B SET",
+   "emoji": "🎛️",
+   "genre": "Hard Groove",
+   "base": "London, UK",
+   "plan": "touring",
+   "memberSince": "2025",
+   "gigsBooked": 18,
+   "rating": 4.88,
+   "reviewCount": 15,
+   "bio": "Hard groove duo. We tour as a pair and need creators who can handle fast-moving b2b energy in dark rooms.",
+   "socials": {
+    "instagram": "karla.b2b",
+    "tiktok": "karla.b2b"
+   },
+   "windows": [],
+   "upcoming": [
+    {
+     "date": "Jun 28",
+     "venue": "Phonox",
+     "city": "London",
+     "status": "Creator booked — Sofia L."
+    }
+   ],
+   "reviews": [
+    {
+     "id": "ar4",
+     "reviewerId": "00000000-0000-4000-8000-0000000000c2",
+     "reviewerName": "Marco Reyes",
+     "reviewerEmoji": "📸",
+     "stars": 5,
+     "gigLabel": "RSO Berlin · Apr 2026",
+     "body": "Professional duo, clear about what they wanted, flexible on the night. Great to work with."
+    },
+    {
+     "id": "ar5",
+     "reviewerId": "00000000-0000-4000-8000-0000000000c4",
+     "reviewerName": "Tom Hartley",
+     "reviewerEmoji": "🎬",
+     "stars": 4,
+     "gigLabel": "Phonox, London · Apr 2026",
+     "body": "Good gig, fair pay. Brief arrived a bit last-minute but they were great in person."
+    }
+   ]
+  },
+  {
+   "id": "00000000-0000-4000-8000-0000000000a3",
+   "handle": "moodtrap",
+   "name": "Moodtrap",
+   "emoji": "🎹",
+   "genre": "Deep House / Live",
+   "base": "Amsterdam, Netherlands",
+   "plan": "touring",
+   "memberSince": "2024",
+   "gigsBooked": 22,
+   "rating": 4.95,
+   "reviewCount": 19,
+   "bio": "Live deep house act. Hardware on stage, visuals matter. I invest heavily in content — it’s how a live act survives.",
+   "socials": {
+    "instagram": "moodtrap.live",
+    "website": "https://moodtrap.live"
+   },
+   "windows": [],
+   "upcoming": [
+    {
+     "date": "Jul 12",
+     "venue": "Open-air Noord",
+     "city": "Amsterdam",
+     "status": "Creator booked — Amara O."
+    }
+   ],
+   "reviews": [
+    {
+     "id": "ar6",
+     "reviewerId": "00000000-0000-4000-8000-0000000000c3",
+     "reviewerName": "Amara Okafor",
+     "reviewerEmoji": "🚁",
+     "stars": 5,
+     "gigLabel": "Open-air, Amsterdam Noord · May 2026",
+     "body": "Knows exactly what a live act needs on camera. Briefed me on every hardware moment to catch. A creator’s dream artist."
+    },
+    {
+     "id": "ar7",
+     "reviewerId": "00000000-0000-4000-8000-0000000000c6",
+     "reviewerName": "Priya Sharma",
+     "reviewerEmoji": "🎞️",
+     "stars": 5,
+     "gigLabel": "Elsewhere, Brooklyn · Apr 2026",
+     "body": "Flew me a brief two weeks ahead with timestamps of the set structure. Unreal preparation."
+    }
+   ]
+  },
+  {
+   "id": "00000000-0000-4000-8000-0000000000a4",
+   "handle": "selva",
+   "name": "Selva",
+   "emoji": "🌴",
+   "genre": "Organic House",
+   "base": "Barcelona, Spain",
+   "plan": null,
+   "memberSince": "2025",
+   "gigsBooked": 12,
+   "rating": 4.81,
+   "reviewCount": 9,
+   "bio": "Organic house selector. Sunset slots, boat parties, anything golden hour. Building my visual identity gig by gig.",
+   "socials": {
+    "instagram": "selva.sound"
+   },
+   "windows": [],
+   "upcoming": [
+    {
+     "date": "Jun 19",
+     "venue": "Beach club",
+     "city": "Barcelona",
+     "status": "2 applicants — choosing"
+    }
+   ],
+   "reviews": [
+    {
+     "id": "ar8",
+     "reviewerId": "00000000-0000-4000-8000-0000000000c5",
+     "reviewerName": "Yuki Tanaka",
+     "reviewerEmoji": "📷",
+     "stars": 5,
+     "gigLabel": "OHM, Berlin · May 2026",
+     "body": "Lovely to work with, strong aesthetic vision, fast payment. Recommended."
+    },
+    {
+     "id": "ar9",
+     "reviewerId": "00000000-0000-4000-8000-0000000000c7",
+     "reviewerName": "Dries Vermeulen",
+     "reviewerEmoji": "📹",
+     "stars": 5,
+     "gigLabel": "Boat party, Amsterdam · May 2026",
+     "body": "Gave me a real shot while I’m still building reviews here. Generous with feedback and credit."
+    }
+   ]
+  }
+ ],
+ "bookings": [
+  {
+   "id": "00000000-0000-4000-8000-00000000b001",
+   "artistId": "00000000-0000-4000-8000-0000000000a1",
+   "creatorId": "00000000-0000-4000-8000-0000000000c1",
+   "artistName": "DJ Nova",
+   "creatorName": "Lena Vogel",
+   "venue": "Sisyphos",
+   "city": "Berlin",
+   "gigAt": "2026-05-09T23:00:00+02:00",
+   "package": "Full set video + recap edit",
+   "status": "completed"
+  },
+  {
+   "id": "00000000-0000-4000-8000-00000000b003",
+   "artistId": "00000000-0000-4000-8000-0000000000a1",
+   "creatorId": "00000000-0000-4000-8000-0000000000c2",
+   "artistName": "DJ Nova",
+   "creatorName": "Marco Reyes",
+   "venue": "Nitsa",
+   "city": "Barcelona",
+   "gigAt": "2026-02-21T01:00:00+01:00",
+   "package": "Photos only (press-kit quality)",
+   "status": "completed"
+  },
+  {
+   "id": "00000000-0000-4000-8000-00000000b005",
+   "artistId": "00000000-0000-4000-8000-0000000000a1",
+   "creatorId": "00000000-0000-4000-8000-0000000000c8",
+   "artistName": "DJ Nova",
+   "creatorName": "Sofia Lindqvist",
+   "venue": "XOYO",
+   "city": "London",
+   "gigAt": "2026-05-02T23:00:00+01:00",
+   "package": "Vertical edits for socials",
+   "status": "completed"
+  },
+  {
+   "id": "00000000-0000-4000-8000-00000000b010",
+   "artistId": "00000000-0000-4000-8000-0000000000a1",
+   "creatorId": "00000000-0000-4000-8000-0000000000c3",
+   "artistName": "DJ Nova",
+   "creatorName": "Amara Okafor",
+   "venue": "Open-air Noord",
+   "city": "Amsterdam",
+   "gigAt": "2026-07-12T18:00:00+02:00",
+   "package": "Full package (video + photo + socials)",
+   "status": "requested"
+  },
+  {
+   "id": "00000000-0000-4000-8000-00000000b011",
+   "artistId": "00000000-0000-4000-8000-0000000000a1",
+   "creatorId": "00000000-0000-4000-8000-0000000000c4",
+   "artistName": "DJ Nova",
+   "creatorName": "Tom Hartley",
+   "venue": "Phonox",
+   "city": "London",
+   "gigAt": "2026-06-28T23:00:00+01:00",
+   "package": "Vertical edits for socials",
+   "status": "accepted"
+  },
+  {
+   "id": "00000000-0000-4000-8000-00000000b012",
+   "artistId": "00000000-0000-4000-8000-0000000000a1",
+   "creatorId": "00000000-0000-4000-8000-0000000000c6",
+   "artistName": "DJ Nova",
+   "creatorName": "Priya Sharma",
+   "venue": "Elsewhere",
+   "city": "New York",
+   "gigAt": "2026-07-18T22:00:00-04:00",
+   "package": "Full set video + recap edit",
+   "status": "accepted"
+  },
+  {
+   "id": "00000000-0000-4000-8000-00000000b013",
+   "artistId": "00000000-0000-4000-8000-0000000000a1",
+   "creatorId": "00000000-0000-4000-8000-0000000000c5",
+   "artistName": "DJ Nova",
+   "creatorName": "Yuki Tanaka",
+   "venue": "OHM",
+   "city": "Berlin",
+   "gigAt": "2026-06-20T23:30:00+02:00",
+   "package": "Photos only (press-kit quality)",
+   "status": "delivered"
+  }
+ ]
+}

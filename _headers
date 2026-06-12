@@ -1,0 +1,18 @@
+# Cloudflare Pages response headers. GitHub Pages ignores this file, so it's
+# safe to keep in the repo during the transition.
+
+# Long-cache the immutable hashed bundles and the vendored map library.
+/_expo/*
+  Cache-Control: public, max-age=31536000, immutable
+/vendor/*
+  Cache-Control: public, max-age=604800
+
+# Security headers for every document. CSP is scoped to what the app actually
+# talks to: same-origin (the vendored map + demo JSON), Supabase (live data +
+# functions), Base RPC (USDC verification), OpenFreeMap tiles, Open-Meteo
+# geocoding. The map runs in a same-origin iframe (frame-src 'self').
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: SAMEORIGIN
+  Referrer-Policy: strict-origin-when-cross-origin
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://mainnet.base.org https://tiles.openfreemap.org https://geocoding-api.open-meteo.com; frame-src 'self'; worker-src 'self' blob:

@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<!-- Self-hosted, pinned (public/vendor/, copied from node_modules at build).
+  No CDN dependency, no document.write fallback loader, no third-party
+  origin in the load path — served from the same origin as the app, which
+  removes the L-2 finding and the S-5 availability gap in one move. -->
+<link href="vendor/maplibre-gl.css" rel="stylesheet" />
+<script src="vendor/maplibre-gl.js"></script>
+<style>
+  html, body, #map { margin: 0; height: 100%; background: #0c0a14; }
+  .gigshot-popup .maplibregl-popup-content {
+    background: #1a1626;
+    border: 1px solid #2c2540;
+    border-radius: 12px;
+    padding: 0;
+    box-shadow: 0 8px 30px rgba(0,0,0,.5);
+  }
+  .gigshot-popup .maplibregl-popup-tip { border-top-color: #2c2540; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+let POINTS = JSON.parse(decodeURIComponent(location.hash.slice(1) || '%5B%5D'));
+const C = {"bg":"#0c0a14","bgSoft":"#14111f","card":"#1a1626","border":"#2c2540","text":"#f2eefb","muted":"#9b93b3","accent":"#a855f7","accent2":"#ec4899","gold":"#fbbf24"};
+
+// Gozo's retintMap, night edition: repaint every positron layer to the
+// Gigshot palette instead of swapping tile providers.
+function retintMap(map) {
+  const LAND = C.bg, LAND_ALT = C.bgSoft;
+  const WATER = '#070510', WATER_ALT = '#040208';
+  const BUILDING = C.card, BUILDING_OUTLINE = C.border;
+  const ROAD = '#211b31', ROAD_CASING = C.border, ROAD_MAJOR = '#352b4e';
+  const TEXT = C.muted, TEXT_SOFT = '#6f6788', TEXT_HALO = C.bg;
+  for (const layer of map.getStyle().layers ?? []) {
+    const id = layer.id.toLowerCase();
+    if (layer.type === 'background') {
+      map.setPaintProperty(layer.id, 'background-color', LAND);
+    } else if (layer.type === 'fill') {
+      if (id.includes('water')) {
+        map.setPaintProperty(layer.id, 'fill-color', WATER);
+      } else if (id.includes('building')) {
+        map.setPaintProperty(layer.id, 'fill-color', BUILDING);
+        map.setPaintProperty(layer.id, 'fill-outline-color', BUILDING_OUTLINE);
+      } else if (id.includes('parking') || id.includes('pedestrian') || id.includes('transportation') || id.includes('aeroway')) {
+        map.setPaintProperty(layer.id, 'fill-color', ROAD);
+        map.setPaintProperty(layer.id, 'fill-outline-color', ROAD);
+      } else if (id.includes('landuse') || id.includes('park') || id.includes('wood')) {
+        map.setPaintProperty(layer.id, 'fill-color', LAND_ALT);
+      } else if (id.includes('landcover') || id.includes('land')) {
+        map.setPaintProperty(layer.id, 'fill-color', LAND);
+      }
+    } else if (layer.type === 'line') {
+      if (id.includes('water')) {
+        map.setPaintProperty(layer.id, 'line-color', WATER_ALT);
+      } else if (id.includes('highway') || id.includes('railway') || id.includes('road') || id.includes('tunnel') || id.includes('bridge') || id.includes('aeroway')) {
+        const isCasing = id.includes('casing') || id.includes('outline');
+        const isMajor = id.includes('motorway') || id.includes('trunk') || id.includes('primary') || id.includes('major');
+        map.setPaintProperty(layer.id, 'line-color', isCasing ? ROAD_CASING : isMajor ? ROAD_MAJOR : ROAD);
+      }
+    } else if (layer.type === 'symbol') {
+      const isMinor = id.includes('road') || id.includes('poi') || id.includes('housenumber');
+      try {
+        map.setPaintProperty(layer.id, 'text-color', isMinor ? TEXT_SOFT : TEXT);
+        map.setPaintProperty(layer.id, 'text-halo-color', TEXT_HALO);
+        map.setPaintProperty(layer.id, 'text-halo-width', 1.2);
+      } catch (e) {}
+    }
+  }
+}
+
+// PRO ring: the gozo Partner treatment — slightly larger, a soft ring,
+// never louder. Restraint is the point.
+const PRO_RING = '0 0 0 3px rgba(251,191,36,0.35)';
+
+function styleMarker(el, active, pro) {
+  const base = pro ? 38 : 34;
+  const size = active ? base + 6 : base;
+  el.style.width = size + 'px';
+  el.style.height = size + 'px';
+  el.style.borderRadius = '50%';
+  el.style.display = 'flex';
+  el.style.alignItems = 'center';
+  el.style.justifyContent = 'center';
+  el.style.fontSize = Math.round(size * 0.5) + 'px';
+  el.style.background = active
+    ? 'linear-gradient(135deg, ' + C.accent + ', ' + C.accent2 + ')'
+    : C.card;
+  el.style.border = '2px solid ' + (active ? C.text : C.accent);
+  const baseShadow = active ? '0 4px 14px rgba(168,85,247,.6)' : '0 2px 8px rgba(0,0,0,.5)';
+  el.style.boxShadow = pro && !active ? baseShadow + ', ' + PRO_RING : baseShadow;
+  el.style.cursor = 'pointer';
+  el.style.zIndex = active ? '10' : pro ? '2' : '1';
+  el.style.transition = 'width .18s, height .18s, background .18s, box-shadow .18s, border-color .18s';
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+
+// Bridge that works in both hosts: React Native WebView (postMessage to RN)
+// and a plain iframe on web (postMessage to the parent window).
+window.notify = function (payload) {
+  const json = JSON.stringify(payload);
+  if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(json);
+  else window.parent.postMessage(json, '*');
+};
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: 'https://tiles.openfreemap.org/styles/positron',
+  center: [6.5, 49.5],
+  zoom: 3.4,
+  attributionControl: false,
+});
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+
+// Single long-lived map instance: periods swap markers via setPoints —
+// remounting MapLibre (new WebGL context per period) stalls its render loop.
+let markers = [];
+
+function clearMarkers() {
+  for (const m of markers) m.remove();
+  markers = [];
+}
+
+function popupCard(p) {
+  const proBadge = p.pro
+    ? '<span style="font-size:10px;font-weight:700;color:' + C.gold + ';border:1px solid rgba(251,191,36,.4);border-radius:99px;padding:1px 7px;margin-left:6px">PRO</span>'
+    : '';
+  return (
+    '<div style="width:225px;padding:12px 14px;font-family:system-ui,sans-serif">' +
+      '<div style="font-size:16px;font-weight:800;color:' + C.text + '">' + esc(p.name) + proBadge + '</div>' +
+      '<div style="font-size:12px;font-weight:600;color:' + C.accent + ';margin:2px 0 4px">' + esc(p.role) + ' · ' + esc(p.city) + '</div>' +
+      '<div style="font-size:13px;color:' + C.muted + '">' + esc(p.ratingLabel) + ' · from ' + esc(p.rateLabel) + '</div>' +
+      (p.via ? '<div style="font-size:11px;font-weight:600;color:' + C.gold + ';margin-top:4px">✈ ' + esc(p.via) + '</div>' : '') +
+      // L-2: ids are escaped into the inline handler too, not just display fields.
+      '<button onclick="window.notify({type:\'creator\',id:\'' + esc(p.id) + '\'})" ' +
+        'style="margin-top:10px;width:100%;padding:9px 0;border:none;border-radius:99px;font-weight:700;font-size:13px;color:#fff;cursor:pointer;background:linear-gradient(135deg,' + C.accent + ',' + C.accent2 + ')">View profile</button>' +
+    '</div>'
+  );
+}
+
+// DOM emoji markers below this count (the expressive path); MapLibre's
+// built-in GeoJSON clustering above it (the 100k path — thousands of points
+// stay smooth because the GPU does the work, not the DOM).
+const DOM_MARKER_LIMIT = 60;
+
+function addMarkers(pts) {
+  for (const p of pts) {
+    const el = document.createElement('div');
+    el.textContent = p.emoji;
+    el.setAttribute('aria-label', p.name);
+    styleMarker(el, false, p.pro);
+
+    const popup = new maplibregl.Popup({ offset: 22, closeButton: false, maxWidth: '250px', className: 'gigshot-popup' })
+      .setHTML(popupCard(p));
+    popup.on('open', () => styleMarker(el, true, p.pro));
+    popup.on('close', () => styleMarker(el, false, p.pro));
+
+    const m = new maplibregl.Marker({ element: el }).setLngLat([p.lng, p.lat]).setPopup(popup).addTo(map);
+    markers.push(m);
+  }
+  fitAll();
+}
+
+function toGeoJSON(pts) {
+  return {
+    type: 'FeatureCollection',
+    features: pts.map(p => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
+      properties: p,
+    })),
+  };
+}
+
+function ensureClusterLayers() {
+  if (map.getSource('creators')) return;
+  map.addSource('creators', {
+    type: 'geojson',
+    data: toGeoJSON([]),
+    cluster: true,
+    clusterMaxZoom: 14,
+    clusterRadius: 50,
+  });
+  map.addLayer({
+    id: 'clusters', type: 'circle', source: 'creators',
+    filter: ['has', 'point_count'],
+    paint: {
+      'circle-color': C.accent,
+      'circle-opacity': 0.85,
+      'circle-radius': ['step', ['get', 'point_count'], 16, 25, 22, 100, 28],
+      'circle-stroke-width': 2,
+      'circle-stroke-color': C.text,
+    },
+  });
+  map.addLayer({
+    id: 'cluster-count', type: 'symbol', source: 'creators',
+    filter: ['has', 'point_count'],
+    layout: { 'text-field': ['get', 'point_count_abbreviated'], 'text-size': 13, 'text-font': ['Noto Sans Bold'] },
+    paint: { 'text-color': '#ffffff' },
+  });
+  map.addLayer({
+    id: 'points', type: 'circle', source: 'creators',
+    filter: ['!', ['has', 'point_count']],
+    paint: {
+      'circle-color': C.card,
+      'circle-radius': 9,
+      'circle-stroke-width': 2,
+      'circle-stroke-color': C.accent,
+    },
+  });
+  map.on('click', 'clusters', (e) => {
+    const f = map.queryRenderedFeatures(e.point, { layers: ['clusters'] })[0];
+    const src = map.getSource('creators');
+    const result = src.getClusterExpansionZoom(f.properties.cluster_id, (err, zoom) => {
+      if (!err) map.easeTo({ center: f.geometry.coordinates, zoom });
+    });
+    if (result && result.then) {
+      result.then(zoom => map.easeTo({ center: f.geometry.coordinates, zoom }));
+    }
+  });
+  map.on('click', 'points', (e) => {
+    const p = e.features[0].properties;
+    new maplibregl.Popup({ offset: 14, closeButton: false, maxWidth: '250px', className: 'gigshot-popup' })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(popupCard(p))
+      .addTo(map);
+  });
+  map.on('mouseenter', 'clusters', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'clusters', () => { map.getCanvas().style.cursor = ''; });
+  map.on('mouseenter', 'points', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'points', () => { map.getCanvas().style.cursor = ''; });
+}
+
+function setClusterData(pts) {
+  ensureClusterLayers();
+  map.getSource('creators').setData(toGeoJSON(pts));
+}
+
+window.setPoints = function (pts) {
+  POINTS = pts;
+  clearMarkers();
+  if (pts.length <= DOM_MARKER_LIMIT) {
+    if (map.getSource('creators')) setClusterData([]);
+    addMarkers(pts);
+  } else {
+    setClusterData(pts);
+    fitAll();
+  }
+};
+
+map.on('load', () => {
+  retintMap(map);
+  window.setPoints(POINTS);
+  window.notify({ type: 'ready' });
+});
+
+function boundsOf(pts) {
+  const b = new maplibregl.LngLatBounds();
+  for (const p of pts) b.extend([p.lng, p.lat]);
+  return b;
+}
+
+function fitAll() {
+  if (POINTS.length) map.fitBounds(boundsOf(POINTS), { padding: 70, maxZoom: 12, duration: 900 });
+}
+
+// City focus is derived from the data, not a hardcoded gazetteer: zoom to
+// the bounds of that city's creators, wherever they happen to be.
+window.focusCity = function (city) {
+  if (!city) { fitAll(); return; }
+  const pts = POINTS.filter(p => p.city === city);
+  if (!pts.length) return;
+  if (pts.length === 1) {
+    map.flyTo({ center: [pts[0].lng, pts[0].lat], zoom: 12.5, duration: 1100 });
+  } else {
+    map.fitBounds(boundsOf(pts), { padding: 90, maxZoom: 13, duration: 1100 });
+  }
+};
+</script>
+</body>
+</html>
