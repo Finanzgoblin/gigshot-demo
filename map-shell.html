@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<!-- Self-hosted, pinned (public/vendor/, copied from node_modules at build).
+  No CDN dependency, no document.write fallback loader, no third-party
+  origin in the load path — served from the same origin as the app, which
+  removes the L-2 finding and the S-5 availability gap in one move. -->
+<link href="vendor/maplibre-gl.css" rel="stylesheet" />
+<script src="vendor/maplibre-gl.js"></script>
+<style>
+  html, body, #map { margin: 0; height: 100%; background: #0c0a14; }
+  /* Marker elements carry inline z-index (1–10); a maplibre popup defaults to
+     auto, so without this the popup card renders BEHIND nearby markers (the
+     "info box in the background" bug). Lift every gigshot popup above all pins. */
+  .gigshot-popup { z-index: 20; }
+  .gigshot-popup .maplibregl-popup-content {
+    background: #1a1626;
+    border: 1px solid #2c2540;
+    border-radius: 12px;
+    padding: 0;
+    box-shadow: 0 8px 30px rgba(0,0,0,.5);
+  }
+  .gigshot-popup .maplibregl-popup-tip { border-top-color: #2c2540; }
+  /* The availability legend moved into MapBottomSheet's RN header (real React
+     state, not a shell-side static div): see src/components/map/MapBottomSheet.tsx. */
+  /* Soft amber pulse on "looking" (open-request/demand) pins: a second
+     box-shadow ring animates on top of the resting shadow already set via
+     el.style.cssText in window.setDemandPoints below. Reduced-motion is
+     respected two ways: the RN-side reducedMotion flag (threaded through
+     pushDemandPoints -> setDemandPoints's second argument) skips adding the
+     .gs-pulse class at all, and this @media query is a belt-and-suspenders
+     backstop for the browser/OS-level preference (covers web races where the
+     RN flag hasn't fired yet on first paint; native has no media query at all,
+     so the JS flag is the only guard there). */
+  @keyframes gs-beacon-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,0.55); }
+    50% { box-shadow: 0 0 0 8px rgba(245,158,11,0); }
+  }
+  .gs-pulse { animation: gs-beacon-pulse 1.8s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) {
+    .gs-pulse { animation: none; }
+  }
+  /* Zoom (+/-) control (MapLibre NavigationControl). The search pill + filters
+     chip row are a React overlay ABOVE this iframe, so a top-right control
+     collides with them (founder: "the +/- overlaps the search bar"). Push it
+     DOWN clear of that chrome, and restyle from MapLibre's default white to the
+     app's dark theme. */
+  .maplibregl-ctrl-top-right { margin-top: 120px; margin-right: 10px; }
+  .maplibregl-ctrl-group {
+    background: #1a1626;
+    border: 1px solid #2c2540;
+    border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.4);
+    overflow: hidden;
+  }
+  .maplibregl-ctrl-group button { background: transparent; width: 34px; height: 34px; }
+  .maplibregl-ctrl-group button + button { border-top: 1px solid #2c2540; }
+  .maplibregl-ctrl-group button:hover { background: #14111f; }
+  /* MapLibre's +/- glyphs are dark SVGs; invert them to read on the dark fill. */
+  .maplibregl-ctrl-group button .maplibregl-ctrl-icon { filter: invert(0.85); }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+let POINTS = JSON.parse(decodeURIComponent(location.hash.slice(1) || '%5B%5D'));
+const C = {"bg":"#0c0a14","bgSoft":"#14111f","card":"#1a1626","border":"#2c2540","text":"#f2eefb","muted":"#9b93b3","mutedStrong":"#c9c4d6","accent":"#a855f7","accent2":"#ec4899","gold":"#fbbf24","green":"#34d399","acid":"#A3E635","acidHot":"#B6FF00","acidInk":"#ffffff"};
+
+// Gozo's retintMap, night edition: repaint every positron layer to the
+// Gigshot palette instead of swapping tile providers.
+function retintMap(map) {
+  const LAND = C.bg, LAND_ALT = C.bgSoft;
+  // WATER used to be '#070510' — visually identical to LAND (C.bg) at a
+  // glance, so zoomed out to continent/country scale (fill layers only, no
+  // roads/buildings yet) the map read as a featureless void: no coastline,
+  // no borders, nothing to anchor on. Now a clearly-distinct deep blue-black
+  // so land vs. water reads immediately, while staying in the night palette.
+  const WATER = '#0e1526', WATER_ALT = '#0a0f1c';
+  const BUILDING = C.card, BUILDING_OUTLINE = C.border;
+  const ROAD = '#211b31', ROAD_CASING = C.border, ROAD_MAJOR = '#352b4e';
+  const TEXT = C.muted, TEXT_SOFT = '#6f6788', TEXT_HALO = C.bg;
+  // Subtle but visible country-outline tone — the only other landmark visible
+  // at low zoom besides the coastline, so a zoomed-out map reads as "a world"
+  // rather than a void between coast and the first city label.
+  const BOUNDARY = '#3a3354';
+  for (const layer of map.getStyle().layers ?? []) {
+    const id = layer.id.toLowerCase();
+    if (layer.type === 'background') {
+      map.setPaintProperty(layer.id, 'background-color', LAND);
+    } else if (layer.type === 'fill') {
+      if (id.includes('water')) {
+        map.setPaintProperty(layer.id, 'fill-color', WATER);
+      } else if (id.includes('building')) {
+        map.setPaintProperty(layer.id, 'fill-color', BUILDING);
+        map.setPaintProperty(layer.id, 'fill-outline-color', BUILDING_OUTLINE);
+      } else if (id.includes('parking') || id.includes('pedestrian') || id.includes('transportation') || id.includes('aeroway')) {
+        map.setPaintProperty(layer.id, 'fill-color', ROAD);
+        map.setPaintProperty(layer.id, 'fill-outline-color', ROAD);
+      } else if (id.includes('landuse') || id.includes('park') || id.includes('wood')) {
+        map.setPaintProperty(layer.id, 'fill-color', LAND_ALT);
+      } else if (id.includes('landcover') || id.includes('land')) {
+        map.setPaintProperty(layer.id, 'fill-color', LAND);
+      }
+    } else if (layer.type === 'line') {
+      if (id.includes('water')) {
+        map.setPaintProperty(layer.id, 'line-color', WATER_ALT);
+      } else if (id.includes('boundary') || id.includes('admin')) {
+        // Country/admin outlines — the other landmark visible at continent
+        // zoom besides the coastline. Left at the stylesheet default before,
+        // these blended into the near-black fills; a subtle but visible tone
+        // makes borders read without competing with roads/pins up close.
+        map.setPaintProperty(layer.id, 'line-color', BOUNDARY);
+      } else if (id.includes('highway') || id.includes('railway') || id.includes('road') || id.includes('tunnel') || id.includes('bridge') || id.includes('aeroway')) {
+        const isCasing = id.includes('casing') || id.includes('outline');
+        const isMajor = id.includes('motorway') || id.includes('trunk') || id.includes('primary') || id.includes('major');
+        map.setPaintProperty(layer.id, 'line-color', isCasing ? ROAD_CASING : isMajor ? ROAD_MAJOR : ROAD);
+      }
+    } else if (layer.type === 'symbol') {
+      const isMinor = id.includes('road') || id.includes('poi') || id.includes('housenumber');
+      try {
+        map.setPaintProperty(layer.id, 'text-color', isMinor ? TEXT_SOFT : TEXT);
+        map.setPaintProperty(layer.id, 'text-halo-color', TEXT_HALO);
+        map.setPaintProperty(layer.id, 'text-halo-width', 1.2);
+      } catch (e) {}
+    }
+  }
+}
+
+// PRO ring: the gozo Partner treatment — slightly larger, a soft ring,
+// never louder. Restraint is the point.
+const PRO_RING = '0 0 0 3px rgba(251,191,36,0.35)';
+
+// Travel (presence-window) markers are GREEN — "they're traveling HERE", as
+// opposed to the accent (purple) HOME pin. Differentiated by colour AND a glyph
+// (a ✈ corner badge) + a square-ish shape cue, never colour alone (a11y).
+const TRAVEL = C.green;
+const TRAVEL_RING = '0 0 0 3px rgba(34,197,94,0.35)';
+
+// Identity accent per pin (subject-partition amendment, 2026-07-02): a pin is a
+// creator's presence on the map, so it wears the OWNER's vertical like
+// CreatorCard. Since the acid DJ vertical was retired 2026-07-13, DJ and
+// videographer pins render the same purple (both branches below resolve to it).
+// Availability treatments (confirmed green square + ✓ badge, gold PRO ring) are
+// STATES, not identities — they keep their colours and take precedence.
+function identColor(p) { return p.vertical === 'dj' ? C.acid : C.accent; }
+// Active-pin glow, per vertical (was hardcoded purple).
+function identGlow(p) {
+  return p.vertical === 'dj' ? '0 4px 14px rgba(163,230,53,.6)' : '0 4px 14px rgba(168,85,247,.6)';
+}
+// Active-pin face + popup CTA gradient, per vertical.
+function identGradient(p) {
+  return p.vertical === 'dj'
+    ? 'linear-gradient(135deg, ' + C.acid + ', ' + C.acidHot + ')'
+    : 'linear-gradient(135deg, ' + C.accent + ', ' + C.accent2 + ')';
+}
+
+// "Load as you zoom": the profile photo only paints onto the pin at/above this
+// zoom. Far out (continent view) pins stay cheap emoji tiles and NO image is
+// requested; as you zoom into a city the photos load for the handful on screen.
+const PHOTO_ZOOM = 6;
+
+// styleMarker now takes the whole point so it can paint a photo OR the emoji.
+// (Kept the name + (el, p, active) shape; every caller passes the point.)
+function styleMarker(el, p, active) {
+  // CONFIRMED-here = a presence window covers the queried date (availState), or,
+  // for older callers, simply a via note. Green, distinct ring, and a slightly
+  // rounded SQUARE (not a circle) — a shape cue so it reads as "confirmed" even
+  // without colour. REACHABLE (home fallback) points keep the round accent
+  // treatment, and are DIMMED to read as the softer "ask if they can travel".
+  const confirmed = p.availState ? p.availState === 'confirmed' : !!p.via;
+  const reachable = p.availState === 'reachable';
+  const base = p.pro ? 38 : 34;
+  const size = active ? base + 6 : base;
+  // Do NOT set an inline CSS position here. MapLibre positions the marker root
+  // via its .maplibregl-marker class (position:absolute) plus an inline
+  // transform; an inline 'relative' overrides that class and drops every pin
+  // back into DOCUMENT FLOW, so pins stack in a vertical column down the map
+  // instead of sitting at their coordinates (the "map is completely off" bug,
+  // present since cfffe5e). z-index still applies (the class makes the element
+  // positioned), and the rings/photo are box-shadow/background on this same
+  // element, so nothing here needs its own positioning context.
+  // (This function body lives inside the shell template literal: no backticks
+  // in comments here, they terminate the string and break build:shell.)
+  el.style.width = size + 'px';
+  el.style.height = size + 'px';
+  // Shape cue: confirmed pins are rounded-squares, reachable/home pins are circles.
+  el.style.borderRadius = confirmed ? '30%' : '50%';
+  el.style.boxSizing = 'border-box';
+  // Dim reachable (home-fallback) pins so confirmed pins read as the answer;
+  // confirmed (or no availState) pins stay full strength.
+  // Dim only when the host flagged it (a relative signal: reachable AND there's a
+  // confirmed pin to contrast with) — never dim the whole map on the default view.
+  el.style.opacity = p.dim ? '0.55' : '1';
+  // Reachable/home pins wear the OWNER's identity accent (purple for all roles
+  // now — the acid DJ vertical was retired 2026-07-13); confirmed pins keep the
+  // green availability treatment.
+  const borderColor = active ? C.text : confirmed ? TRAVEL : identColor(p);
+  el.style.border = '2px solid ' + borderColor;
+  const baseShadow = active
+    ? (confirmed ? '0 4px 14px rgba(34,197,94,.6)' : identGlow(p))
+    : '0 2px 8px rgba(0,0,0,.5)';
+  // Confirmed ring (green) takes precedence over the PRO ring so the "here on
+  // your date" signal is never lost; reachable PRO pins keep the gold ring.
+  const ring = confirmed && !active ? TRAVEL_RING : p.pro && !active ? PRO_RING : '';
+  el.style.boxShadow = ring ? baseShadow + ', ' + ring : baseShadow;
+  // Own gig pins are draggable → a grab cursor signals "move me"; everyone
+  // else's keep the plain pointer.
+  el.style.cursor = p.editable ? 'grab' : 'pointer';
+  el.style.zIndex = active ? '10' : confirmed ? '3' : p.pro ? '2' : '1';
+  el.style.transition = 'width .18s, height .18s, box-shadow .18s, border-color .18s';
+  if (p.avatarUrl && map.getZoom() >= PHOTO_ZOOM) {
+    // Photo face: the image fills the circle; no emoji, no gradient.
+    el.textContent = '';
+    el.style.background = C.card;
+    el.style.backgroundImage = "url('" + String(p.avatarUrl).replace(/'/g, '%27') + "')";
+    el.style.backgroundSize = 'cover';
+    el.style.backgroundPosition = 'center';
+  } else {
+    // Emoji face (default, and the fallback when there's no photo or we're zoomed out).
+    el.style.backgroundImage = 'none';
+    el.style.background = active ? identGradient(p) : C.card;
+    el.style.display = 'flex';
+    el.style.alignItems = 'center';
+    el.style.justifyContent = 'center';
+    el.style.fontSize = Math.round(size * 0.5) + 'px';
+    el.textContent = p.emoji;
+  }
+  // ✓ corner badge LAST — the face paths above set el.textContent (which would
+  // drop a child badge), so the badge is (re)attached after the face is painted.
+  // The non-colour glyph cue for confirmed markers; removed when reachable/home.
+  let badge = el.querySelector('.gigshot-travel-badge');
+  if (confirmed) {
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.className = 'gigshot-travel-badge';
+      badge.textContent = '✓';
+      el.appendChild(badge);
+    }
+    const bs = Math.max(14, Math.round(size * 0.46));
+    badge.style.cssText =
+      'position:absolute;top:-6px;right:-6px;width:' + bs + 'px;height:' + bs + 'px;' +
+      'border-radius:50%;background:' + TRAVEL + ';color:#04210f;font-size:' + Math.round(bs * 0.62) + 'px;' +
+      'line-height:' + bs + 'px;text-align:center;font-weight:700;box-shadow:0 1px 4px rgba(0,0,0,.5);' +
+      'pointer-events:none;z-index:1;';
+  } else if (badge) {
+    badge.remove();
+  }
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+
+// Bridge that works in both hosts: React Native WebView (postMessage to RN)
+// and a plain iframe on web (postMessage to the parent window).
+window.notify = function (payload) {
+  const json = JSON.stringify(payload);
+  // Lock the target origin: the shell is served same-origin as the app, so the
+  // parent is always our own origin. '*' would let any embedder read the
+  // payload (incl. a member's home coordinates) if the frame were ever embedded
+  // cross-origin. (Native WebView has no origin concept — RN bridge as-is.)
+  if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(json);
+  else window.parent.postMessage(json, window.location.origin);
+};
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: 'https://tiles.openfreemap.org/styles/positron',
+  center: [6.5, 49.5],
+  zoom: 3.4,
+  attributionControl: false,
+  // fadeDuration 0: kill MapLibre's default 300ms symbol fade-in. The cluster
+  // count labels are a symbol layer; with the default fade they re-fade-in on
+  // every source.setData() (a 'Search as I move' re-query), making the cluster
+  // numbers blink. 0 = labels pop instead — snappier, no flicker. (mapbox-gl-js #5716)
+  fadeDuration: 0,
+});
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+
+// All our camera moves go through pmove (flyToPoint/fitPoints/focusCity/cluster
+// zoom). It used to set a "programmatic" flag so the removed viewport-search
+// could tell our own moves from a human pan; with that feature gone it's a plain
+// passthrough, kept so its many callers don't have to change.
+function pmove(fn) { fn(); }
+window.flyToPoint = function (lng, lat, zoom) {
+  pmove(() => map.flyTo({ center: [lng, lat], zoom: zoom || 11, duration: 900 }));
+};
+
+// "Show my home + travels" fit: frame an arbitrary set of [lng,lat] pairs.
+// maxZoom 9 keeps a single-point or tight cluster from rocketing to street
+// level; setPadding(0) first sidesteps the known maplibre bug where successive
+// fitBounds padding values accumulate (each call would otherwise add to the
+// last, slowly squeezing the framed area). Single point → a plain flyTo.
+window.fitPoints = function (coords, zoom) {
+  if (!coords || !coords.length) return;
+  if (coords.length === 1) {
+    pmove(() => map.flyTo({ center: coords[0], zoom: zoom || 9, duration: 900 }));
+    return;
+  }
+  const b = new maplibregl.LngLatBounds();
+  for (const c of coords) b.extend(c);
+  pmove(() => {
+    map.setPadding(0);
+    map.fitBounds(b, { padding: 70, maxZoom: zoom || 9, duration: 900 });
+  });
+};
+
+// Location picker: a single DRAGGABLE marker the member positions to set their
+// own home point (for a place the city dataset doesn't cover). Drag the marker
+// OR click the map to move it; both report {type:'picked', lng, lat} so the host
+// can save it. Switches the shell out of browse mode (no creator pins/clusters).
+let pickerMarker = null;
+window.enablePicker = function (lng, lat) {
+  clearMarkers();
+  if (map.getSource('creators')) setClusterData([]);
+  const start = (typeof lng === 'number' && typeof lat === 'number') ? [lng, lat] : map.getCenter().toArray();
+  if (pickerMarker) pickerMarker.remove();
+  const el = document.createElement('div');
+  el.textContent = '📍';
+  el.style.fontSize = '36px';
+  el.style.lineHeight = '36px';
+  el.style.cursor = 'grab';
+  // Draggable affordance: a soft accent ring + drop shadow so the pin reads as a
+  // movable handle, not a static label. (Cheap text-shadow/filter — no extra DOM.)
+  el.style.filter = 'drop-shadow(0 3px 6px rgba(0,0,0,.55))';
+  el.style.textShadow = '0 0 0 ' + C.accent + ', 0 0 14px rgba(168,85,247,.45)';
+  el.setAttribute('aria-label', 'Your location. Drag to move.');
+  pickerMarker = new maplibregl.Marker({ element: el, draggable: true, anchor: 'bottom' })
+    .setLngLat(start)
+    .addTo(map);
+  pickerMarker.on('dragstart', () => { el.style.cursor = 'grabbing'; });
+  pickerMarker.on('dragend', () => {
+    el.style.cursor = 'grab';
+    const ll = pickerMarker.getLngLat();
+    window.notify({ type: 'picked', lng: ll.lng, lat: ll.lat });
+  });
+  // Existing-pin / search default: open ON the saved point at a street-legible
+  // zoom (14), never the coarse continent default. A bare enablePicker() with no
+  // coords still falls back to the current center (e.g. the gig map's last view).
+  const openZoom = (typeof lng === 'number' && typeof lat === 'number') ? 14 : 11;
+  pmove(() => map.flyTo({ center: start, zoom: openZoom, duration: 600 }));
+  window.notify({ type: 'picked', lng: start[0], lat: start[1] }); // report the starting point
+};
+
+// Exit picker mode: drop the draggable pin so the host can restore the discovery
+// map (it re-pushes setPoints afterwards). No-op when the picker isn't active.
+window.disablePicker = function () {
+  if (pickerMarker) { pickerMarker.remove(); pickerMarker = null; }
+};
+
+// Move the picker pin programmatically — the search-box + "use my location"
+// path. flyToPoint alone only pans the CAMERA; it does NOT move the draggable
+// marker, so the pin would be left behind. setPickerPoint moves the marker,
+// flies to it, and emits the SAME {type:'picked'} the drag/click emit, so the
+// host saves it identically. No-op when the picker isn't enabled (the shell is
+// shared with the discovery map — a stray call there must not paint a pin).
+window.setPickerPoint = function (lng, lat, zoom) {
+  if (!pickerMarker) return; // picker not active — ignore (shared-shell guard)
+  if (typeof lng !== 'number' || typeof lat !== 'number') return;
+  pickerMarker.setLngLat([lng, lat]);
+  pmove(() => map.flyTo({ center: [lng, lat], zoom: zoom || 13, duration: 700 }));
+  window.notify({ type: 'picked', lng: lng, lat: lat });
+};
+
+// Single long-lived map instance: periods swap markers via setPoints —
+// remounting MapLibre (new WebGL context per period) stalls its render loop.
+let markers = [];
+// Demand-anchored context layer (Phase 3): OPEN REQUESTS (unmet demand). A
+// SEPARATE, simple, non-clustered marker set — NEVER routed through setPoints /
+// syncMarkers / the cluster source. Kept distinct so the demand backdrop and the
+// supply pins can never interfere with each other.
+let demandMarkers = [];
+// id -> marker, so setPoints can DIFF (keep unchanged pins) instead of wiping +
+// rebuilding every call — the latter made pins jump/flicker during "search as I
+// move" (every settle tore down and recreated all markers).
+let markerById = {};
+// The single creator popup that may be open. Opening another (a different marker,
+// or a clustered point) closes this one first, so popups never overlay/stack.
+let openPopup = null;
+// Click-outside-to-close (user control & freedom): a click on the map BACKGROUND
+// dismisses the open card. popupJustOpened guards the very click that opened it —
+// in this shell the opening click also reaches map.on('click') (same tick), and
+// closing there would re-create the old "flash" bug. markPopupOpen tracks the
+// open popup AND arms the guard, cleared on the next tick so a LATER background
+// click closes. Every popup (marker / cluster point / demand) routes through it.
+let popupJustOpened = false;
+function markPopupOpen(p) {
+  if (openPopup && openPopup !== p) openPopup.remove();
+  openPopup = p;
+  popupJustOpened = true;
+  setTimeout(function () { popupJustOpened = false; }, 0);
+}
+// Last feature-set signature pushed to the cluster source — see setClusterData.
+let lastClusterSig = null;
+
+function clearMarkers() {
+  for (const m of markers) m.remove();
+  markers = [];
+  markerById = {};
+}
+
+function popupCard(p) {
+  const proBadge = p.pro
+    ? '<span style="font-size:10px;font-weight:700;color:' + C.gold + ';border:1px solid rgba(251,191,36,.4);border-radius:99px;padding:1px 7px;margin-left:6px">PRO</span>'
+    : '';
+  // The role line + CTA follow the pin's vertical (subject partition). Since the
+  // acid DJ vertical was retired 2026-07-13, DJ and the rest both use the purple
+  // gradient with white ink (acidInk is now white too).
+  const ident = identColor(p);
+  const ctaInk = p.vertical === 'dj' ? C.acidInk : '#fff';
+  return (
+    '<div style="width:225px;padding:12px 14px;font-family:system-ui,sans-serif">' +
+      '<div style="font-size:16px;font-weight:800;color:' + C.text + '">' + esc(p.name) + proBadge + '</div>' +
+      '<div style="font-size:12px;font-weight:600;color:' + ident + ';margin:2px 0 4px">' + esc(p.role) + ' · ' + esc(p.city) + '</div>' +
+      '<div style="font-size:13px;color:' + C.mutedStrong + '">' + esc(p.ratingLabel) + ' · from ' + esc(p.rateLabel) + '</div>' +
+      // Last-active (0040): "● Active Xh ago" — already formatted by the host.
+      (p.lastActiveLabel ? '<div style="font-size:11px;font-weight:600;color:' + C.accent2 + ';margin-top:4px">● Active ' + esc(p.lastActiveLabel) + '</div>' : '') +
+      // Availability status line (gold/accent), styled like the old via line.
+      // availLabel supersedes via — it frames the pin as the answer to who can
+      // do my gig on this date (confirmed here vs reachable/ask-to-travel).
+      (p.availLabel
+        ? '<div style="font-size:11px;font-weight:600;color:' + C.gold + ';margin-top:4px">' + esc(p.availLabel) + '</div>'
+        : p.via
+          ? '<div style="font-size:11px;font-weight:600;color:' + C.gold + ';margin-top:4px">✈ ' + esc(p.via) + '</div>'
+          : '') +
+      // No inline onclick: the id is bound via a DOM closure on popup open (see
+      // makeMarker) — an HTML-attribute + JS-string double context is the wrong
+      // place for entity escaping (the demand pin's gs-respond lesson applies
+      // identically here; p.id is a server UUID today, but the closure removes
+      // the footgun regardless of the id source).
+      '<button class="gs-view-profile" ' +
+        'style="margin-top:10px;width:100%;padding:9px 0;border:none;border-radius:99px;font-weight:700;font-size:13px;color:' + ctaInk + ';cursor:pointer;background:' + identGradient(p) + '">View profile</button>' +
+    '</div>'
+  );
+}
+
+// DOM emoji markers below this count (the expressive path); MapLibre's
+// built-in GeoJSON clustering above it (the 100k path — thousands of points
+// stay smooth because the GPU does the work, not the DOM).
+const DOM_MARKER_LIMIT = 60;
+
+// Build ONE marker for a point (used by the diff below). Registered in both the
+// markers array (zoom-repaint iterates it) and markerById (the diff key).
+function makeMarker(p) {
+  const el = document.createElement('div');
+  el.setAttribute('aria-label', p.name);
+  styleMarker(el, p, false);
+
+  // closeOnClick:false is deliberate. MapLibre opens this popup via the map
+  // click that the marker bubbles up (NOT a separate element listener — so we
+  // must NOT stopPropagation, or it never opens). A default closeOnClick would
+  // let that very opening click also close it → the "flash for a millisecond"
+  // bug. With it off, the popup stays; our pick handler (below) separately
+  // ignores clicks that land on a marker, so the map doesn't re-render and
+  // clear the pin. Clicking another marker / the ✕-less card toggles it.
+  const popup = new maplibregl.Popup({ offset: 22, closeButton: false, closeOnClick: false, maxWidth: '250px', className: 'gigshot-popup' })
+    .setHTML(popupCard(p));
+  popup.on('open', () => {
+    markPopupOpen(popup);
+    styleMarker(el, p, true);
+    // Bind View-profile via a closure (p.id captured) — mirrors the demand pin's
+    // gs-respond binding; never interpolate an id into an onclick string.
+    const pel = popup.getElement();
+    const btn = pel && pel.querySelector('.gs-view-profile');
+    if (btn) btn.onclick = () => window.notify({ type: 'creator', id: p.id });
+  });
+  popup.on('close', () => {
+    if (openPopup === popup) openPopup = null;
+    styleMarker(el, p, false);
+  });
+
+  // Own gig pins are draggable so the provider repositions them straight from
+  // the map (the "move my pins" gesture). dragend reports the window + new coords
+  // to the host, which persists it via updatePresenceWindow. A click still opens
+  // the popup — maplibre only fires dragend after a real drag, so a tap never
+  // moves the pin by accident.
+  const m = new maplibregl.Marker({ element: el, draggable: !!p.editable }).setLngLat([p.lng, p.lat]).setPopup(popup).addTo(map);
+  if (p.editable) {
+    el.setAttribute('title', 'Drag to move your gig');
+    m.on('dragstart', () => {
+      el.style.cursor = 'grabbing';
+      if (openPopup) openPopup.remove(); // don't drag a pin with its card hanging open
+    });
+    m.on('dragend', () => {
+      el.style.cursor = 'grab';
+      const ll = m.getLngLat();
+      const lp = m._gigshotPoint || p;
+      window.notify({ type: 'window-moved', key: lp.windowKey, lng: ll.lng, lat: ll.lat });
+    });
+  }
+  m._gigshotPoint = p; // for the zoom repaint
+  markers.push(m);
+  markerById[p.id] = m;
+  return m;
+}
+
+// DIFF the on-map markers to the new set: keep the markers whose id persists
+// (no flicker — they stay exactly where they are), move any that changed coords,
+// add the genuinely-new, remove the gone. This is what stops the "pins jump all
+// over" during "search as I move" — only the delta touches the DOM.
+function syncMarkers(pts) {
+  const want = {};
+  for (const p of pts) want[p.id] = p;
+  for (let i = markers.length - 1; i >= 0; i--) {
+    const m = markers[i];
+    const id = m._gigshotPoint && m._gigshotPoint.id;
+    if (!want[id]) {
+      if (openPopup && m.getPopup && m.getPopup() === openPopup) openPopup = null;
+      m.remove();
+      markers.splice(i, 1);
+      delete markerById[id];
+    }
+  }
+  for (const p of pts) {
+    const existing = markerById[p.id];
+    if (existing) {
+      const lp = existing._gigshotPoint;
+      // Draggability is fixed at construction, so a pin that becomes (or stops
+      // being) the viewer's own editable gig must be REBUILT, not just moved —
+      // otherwise it'd keep the wrong draggable flag.
+      if (!!lp.editable !== !!p.editable) {
+        if (openPopup && existing.getPopup && existing.getPopup() === openPopup) openPopup = null;
+        existing.remove();
+        const idx = markers.indexOf(existing);
+        if (idx >= 0) markers.splice(idx, 1);
+        delete markerById[p.id];
+        makeMarker(p);
+        continue;
+      }
+      if (lp.lng !== p.lng || lp.lat !== p.lat) existing.setLngLat([p.lng, p.lat]);
+      existing._gigshotPoint = p;
+    } else {
+      makeMarker(p);
+    }
+  }
+}
+
+// "Load as you zoom": when crossing the PHOTO_ZOOM threshold, repaint the DOM
+// markers so photos appear (or drop back to emoji on zoom-out). Only the handful
+// of DOM markers (<=60) ever carry photos; the GL cluster path has none.
+let lastPhotoMode = null;
+map.on('zoomend', () => {
+  const photoMode = map.getZoom() >= PHOTO_ZOOM;
+  if (photoMode === lastPhotoMode) return; // only repaint when the threshold is crossed
+  lastPhotoMode = photoMode;
+  for (const m of markers) {
+    const p = m._gigshotPoint;
+    if (p) styleMarker(m.getElement(), p, m.getPopup() && m.getPopup().isOpen());
+  }
+});
+
+function toGeoJSON(pts) {
+  return {
+    type: 'FeatureCollection',
+    features: pts.map(p => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
+      properties: p,
+    })),
+  };
+}
+
+function ensureClusterLayers() {
+  if (map.getSource('creators')) return;
+  map.addSource('creators', {
+    type: 'geojson',
+    data: toGeoJSON([]),
+    cluster: true,
+    clusterMaxZoom: 14,
+    clusterRadius: 50,
+  });
+  map.addLayer({
+    id: 'clusters', type: 'circle', source: 'creators',
+    filter: ['has', 'point_count'],
+    paint: {
+      'circle-color': C.accent,
+      'circle-opacity': 0.85,
+      'circle-radius': ['step', ['get', 'point_count'], 16, 25, 22, 100, 28],
+      'circle-stroke-width': 2,
+      'circle-stroke-color': C.text,
+    },
+  });
+  map.addLayer({
+    id: 'cluster-count', type: 'symbol', source: 'creators',
+    filter: ['has', 'point_count'],
+    layout: { 'text-field': ['get', 'point_count_abbreviated'], 'text-size': 13, 'text-font': ['Noto Sans Bold'] },
+    paint: { 'text-color': '#ffffff' },
+  });
+  map.addLayer({
+    id: 'points', type: 'circle', source: 'creators',
+    filter: ['!', ['has', 'point_count']],
+    paint: {
+      'circle-color': C.card,
+      'circle-radius': 9,
+      'circle-stroke-width': 2,
+      // Data-driven identity stroke (subject partition). Since the acid DJ
+      // vertical was retired 2026-07-13, C.acid now holds the shared purple, so
+      // DJ points and everything else render the same purple. coalesce guards a
+      // point with NO vertical at all (e.g. the dev dump script): match-on-null
+      // is an evaluation error that paints black, not the fallback.
+      // Cluster circles stay purple — a cluster mixes owners, so it's neutral.
+      'circle-stroke-color': ['match', ['coalesce', ['get', 'vertical'], ''], 'dj', C.acid, C.accent],
+    },
+  });
+  map.on('click', 'clusters', (e) => {
+    const f = map.queryRenderedFeatures(e.point, { layers: ['clusters'] })[0];
+    const src = map.getSource('creators');
+    const result = src.getClusterExpansionZoom(f.properties.cluster_id, (err, zoom) => {
+      if (!err) pmove(() => map.easeTo({ center: f.geometry.coordinates, zoom }));
+    });
+    if (result && result.then) {
+      result.then(zoom => pmove(() => map.easeTo({ center: f.geometry.coordinates, zoom })));
+    }
+  });
+  map.on('click', 'points', (e) => {
+    const p = e.features[0].properties;
+    const popup = new maplibregl.Popup({ offset: 14, closeButton: false, maxWidth: '250px', className: 'gigshot-popup' })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(popupCard(p))
+      .addTo(map);
+    markPopupOpen(popup); // closes any prior + arms the click-outside guard
+    popup.on('close', () => { if (openPopup === popup) openPopup = null; });
+  });
+  map.on('mouseenter', 'clusters', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'clusters', () => { map.getCanvas().style.cursor = ''; });
+  map.on('mouseenter', 'points', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'points', () => { map.getCanvas().style.cursor = ''; });
+}
+
+function setClusterData(pts) {
+  ensureClusterLayers();
+  // Skip a redundant setData: a small pan that keeps the SAME points in view
+  // still re-queries and re-pushes; re-setting an identical FeatureCollection
+  // needlessly recomputes clusters (and, pre-fadeDuration:0, re-faded the count
+  // labels). The signature is id@lng,lat per point, order-independent enough for
+  // our purposes (the server returns a stable order for a given bbox).
+  const sig = pts.length + ':' + pts.map(p => p.id + '@' + p.lng + ',' + p.lat).join('|');
+  if (sig === lastClusterSig) return;
+  lastClusterSig = sig;
+  map.getSource('creators').setData(toGeoJSON(pts));
+}
+
+// opts.fit === false keeps the current camera — used by every non-initial push
+// (a filter change) and pick-on-map, so re-pushing points never yanks the map
+// away from where the user just looked. Only the first load / city-focus fits.
+window.setPoints = function (pts, opts) {
+  POINTS = pts;
+  const fit = !opts || opts.fit !== false;
+  if (pts.length <= DOM_MARKER_LIMIT) {
+    if (map.getSource('creators')) setClusterData([]);
+    syncMarkers(pts); // DIFF — keep existing pins in place (no jump/flicker)
+    if (fit) fitAll();
+  } else {
+    // Leaving the DOM path for the GL cluster path → drop the DOM markers once.
+    clearMarkers();
+    setClusterData(pts);
+    if (fit) fitAll();
+  }
+};
+
+// The demand-anchored context layer (Phase 3): render OPEN REQUESTS as AMBER
+// 📣 badges, VISUALLY DISTINCT from the green/purple supply pins, so the map
+// reads as "a scene" (demand present even when supply is thin) without ever
+// being mistaken for a bookable creator. These are simple, non-clustered, and
+// sit BELOW the supply markers in z-index. Robust to an empty array (just clears).
+window.setDemandPoints = function (pts, reducedMotion) {
+  for (const m of demandMarkers) m.remove();
+  demandMarkers = [];
+  if (!pts || !pts.length) return;
+  for (const pt of pts) {
+    if (typeof pt.lng !== 'number' || typeof pt.lat !== 'number') continue;
+    const el = document.createElement('div');
+    el.setAttribute('aria-label', 'Open gig');
+    el.textContent = '📣';
+    // Amber rounded badge, slightly translucent — clearly NOT a supply pin.
+    el.style.cssText =
+      'display:flex;align-items:center;justify-content:center;' +
+      'width:30px;height:30px;border-radius:30%;box-sizing:border-box;' +
+      'background:rgba(245,158,11,0.22);border:2px solid #f59e0b;' +
+      'font-size:15px;cursor:pointer;' +
+      'box-shadow:0 2px 10px rgba(245,158,11,.45);' +
+      // Demand is a recruiting signal — it must be SEEN, not hidden behind a
+      // supply pin at the same city. The marker is offset UP (below) so the badge
+      // floats above the city's supply pin; both stay visible. z-index above
+      // supply (1–3) but below an open popup (10).
+      'z-index:6;';
+    // Soft amber pulse: skipped when the RN side reports reduced motion.
+    if (!reducedMotion) el.classList.add('gs-pulse');
+    const popup = new maplibregl.Popup({ offset: 18, closeButton: false, maxWidth: '250px', className: 'gigshot-popup' })
+      .setHTML(
+        '<div style="width:210px;padding:12px 14px;font-family:system-ui,sans-serif">' +
+          '<div style="font-size:13px;font-weight:800;color:#f59e0b">📣 ' + esc(pt.label || 'Open gig') + '</div>' +
+          '<div style="font-size:12px;color:' + C.mutedStrong + ';margin-top:6px">' + esc(pt.posterName || 'Someone') + ' is looking. Tap to respond.</div>' +
+          '<button class="gs-respond" ' +
+            'style="margin-top:10px;width:100%;padding:8px;border:0;border-radius:8px;cursor:pointer;' +
+            'background:#f59e0b;color:#111;font-weight:800;font-size:13px">Respond</button>' +
+        '</div>'
+      );
+    // Route the demand popup through the shared tracker so click-outside closes it
+    // (and it never stacks with a supply card).
+    popup.on('open', () => {
+      markPopupOpen(popup);
+      // Bind Respond via a CLOSURE (pt.id captured) — never interpolate an id into
+      // an onclick string: an HTML-attribute + JS-string double context is the
+      // wrong place for HTML-entity escaping (the browser entity-decodes before
+      // the JS parses). pt.id is a server UUID today; the DOM listener removes the
+      // footgun regardless of the id source.
+      const pel = popup.getElement();
+      const btn = pel && pel.querySelector('.gs-respond');
+      if (btn) btn.onclick = () => window.notify({ type: 'demand', id: pt.id });
+    });
+    popup.on('close', () => { if (openPopup === popup) openPopup = null; });
+    // Anchor CENTER with no static pixel offset — a fixed offset is a fixed
+    // SCREEN distance, but the map projects a fixed GROUND distance per pixel
+    // that shrinks as you zoom in. At the default zoom (~3.4) a 30px nudge is
+    // 300-500km, which threw a Berlin badge out over the Baltic. Center anchor
+    // means the badge sits exactly on its coordinate at ANY zoom; the upward
+    // dodge (to clear a same-city supply pin) is applied only once we're at
+    // city scale, via demandZoomTick below.
+    const m = new maplibregl.Marker({ element: el, anchor: 'center' })
+      .setLngLat([pt.lng, pt.lat])
+      .setPopup(popup)
+      .addTo(map);
+    m.setOffset(DEMAND_DODGE_ZOOM <= map.getZoom() ? [0, -30] : [0, 0]);
+    demandMarkers.push(m);
+  }
+};
+
+// City-scale threshold: below this, demand badges sit exactly on their
+// coordinate (offset [0,0]) since a same-city supply-pin collision can't
+// happen at continent/country zoom anyway. At/above it, nudge the badge up
+// [0,-30] so it clears a same-city supply pin, mirroring the old fixed offset
+// but now scoped to the zoom level where 30px is actually a small, sane
+// screen distance instead of hundreds of km.
+const DEMAND_DODGE_ZOOM = 9;
+let lastDemandDodge = null;
+map.on('zoomend', () => {
+  const dodge = map.getZoom() >= DEMAND_DODGE_ZOOM;
+  if (dodge === lastDemandDodge) return; // only repaint when the threshold is crossed
+  lastDemandDodge = dodge;
+  for (const m of demandMarkers) m.setOffset(dodge ? [0, -30] : [0, 0]);
+});
+
+map.on('load', () => {
+  retintMap(map);
+  window.setPoints(POINTS);
+  window.notify({ type: 'ready' });
+});
+
+function boundsOf(pts) {
+  const b = new maplibregl.LngLatBounds();
+  for (const p of pts) b.extend([p.lng, p.lat]);
+  return b;
+}
+
+function fitAll() {
+  if (POINTS.length) pmove(() => map.fitBounds(boundsOf(POINTS), { padding: 70, maxZoom: 12, duration: 900 }));
+}
+
+// City focus is derived from the data, not a hardcoded gazetteer: zoom to
+// the bounds of that city's creators, wherever they happen to be.
+window.focusCity = function (city) {
+  if (!city) { fitAll(); return; }
+  const pts = POINTS.filter(p => p.city === city);
+  if (!pts.length) return;
+  if (pts.length === 1) {
+    pmove(() => map.flyTo({ center: [pts[0].lng, pts[0].lat], zoom: 12.5, duration: 1100 }));
+  } else {
+    pmove(() => map.fitBounds(boundsOf(pts), { padding: 90, maxZoom: 13, duration: 1100 }));
+  }
+};
+
+// No viewport ('moved') emit any more: the map is a view, not a query, so camera
+// movement reports nothing to the host. (The old loop emitted the bbox on every
+// settle to drive "Search this area" / "Search as I move", both removed.)
+map.on('click', (e) => {
+  // Picker mode: a map click moves the draggable marker (and reports it). The
+  // discovery map has NO "search near here" pick any more — the viewport is the
+  // query — so a plain map click does nothing in browse mode.
+  if (pickerMarker) {
+    pickerMarker.setLngLat(e.lngLat);
+    window.notify({ type: 'picked', lng: e.lngLat.lng, lat: e.lngLat.lat });
+    return;
+  }
+  // Click on the map BACKGROUND with a card open → dismiss it (user control &
+  // freedom). popupJustOpened is true only for the same-tick opening click, so
+  // tapping a pin still opens its card; a later tap on empty map closes it.
+  if (openPopup && !popupJustOpened) openPopup.remove();
+});
+
+// Keyboard a11y (user control & freedom): ESC dismisses the open card, mirroring
+// the click-outside behaviour above for keyboard / screen-reader users. The cards
+// are closeButton:false, so without this there is no key-only way to dismiss them.
+document.addEventListener('keydown', function (e) {
+  if ((e.key === 'Escape' || e.key === 'Esc') && openPopup) openPopup.remove();
+});
+</script>
+</body>
+</html>
