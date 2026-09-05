@@ -1,0 +1,28 @@
+# Cloudflare Pages response headers. GitHub Pages ignores this file, so it's
+# safe to keep in the repo during the transition.
+
+# Long-cache the immutable hashed bundles and the vendored map library.
+/_expo/*
+  Cache-Control: public, max-age=31536000, immutable
+/vendor/*
+  Cache-Control: public, max-age=604800
+
+# Security headers for every document. CSP is scoped to what the app actually
+# talks to: same-origin (the vendored map + demo JSON), Supabase (live data +
+# functions), Base RPC (USDC verification), OpenFreeMap tiles. The map runs in a
+# same-origin iframe (frame-src 'self').
+#
+# NO GEOCODER HOST. `connect-src` deliberately whitelists no geocoding service —
+# NG3/ADR-5 (PRD-GIGS-DISCOVERY.md:91) makes a live third-party geocoder a product
+# non-goal, after one renamed a member's Victoria (Malta) to Vitória (Brazil) and
+# survived nine days behind a green suite. `https://geocoding-api.open-meteo.com`
+# sat here for eleven days after src/lib/geo.ts was deleted, because
+# tests/place-invariants.test.ts scans .ts/.tsx only and never opened this file.
+# With the entry gone the invariant is ENFORCED, not merely documented: an agent
+# transcribing a stale plan now gets a blocked request in the console instead of a
+# silently renamed gig. Do not re-add a geocoding host here.
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: SAMEORIGIN
+  Referrer-Policy: strict-origin-when-cross-origin
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://mainnet.base.org https://tiles.openfreemap.org; frame-src 'self'; worker-src 'self' blob:
