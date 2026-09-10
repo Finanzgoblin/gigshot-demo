@@ -1,0 +1,3042 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<!-- Self-hosted, pinned (public/vendor/, copied from node_modules at build).
+  No CDN dependency, no document.write fallback loader, no third-party
+  origin in the load path — served from the same origin as the app, which
+  removes the L-2 finding and the S-5 availability gap in one move. -->
+<link href="vendor/maplibre-gl.css" rel="stylesheet" />
+<script src="vendor/maplibre-gl.js"></script>
+<style>
+  html, body, #map { margin: 0; height: 100%; background: #0c0a14; }
+  /* Marker elements carry inline z-index (1–10); a maplibre popup defaults to
+     auto, so without this the popup card renders BEHIND nearby markers (the
+     "info box in the background" bug). Lift every gigshot popup above all pins. */
+  .gigshot-popup { z-index: 20; }
+  .gigshot-popup .maplibregl-popup-content {
+    background: #1a1626;
+    border: 1px solid #2c2540;
+    border-radius: 12px;
+    padding: 0;
+    box-shadow: 0 8px 30px rgba(0,0,0,.5);
+  }
+  .gigshot-popup .maplibregl-popup-tip { border-top-color: #2c2540; }
+  /* The availability legend moved into MapBottomSheet's RN header (real React
+     state, not a shell-side static div): see src/components/map/MapBottomSheet.tsx. */
+  /* Soft amber pulse on "looking" (open-request/demand) pins: a second
+     box-shadow ring animates on top of the resting shadow already set via
+     el.style.cssText in window.setDemandPoints below. Reduced-motion is
+     respected two ways: the RN-side reducedMotion flag (threaded through
+     pushDemandPoints -> setDemandPoints's second argument) skips adding the
+     .gs-pulse class at all, and this @media query is a belt-and-suspenders
+     backstop for the browser/OS-level preference (covers web races where the
+     RN flag hasn't fired yet on first paint; native has no media query at all,
+     so the JS flag is the only guard there). */
+  @keyframes gs-beacon-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,0.55); }
+    50% { box-shadow: 0 0 0 8px rgba(245,158,11,0); }
+  }
+  .gs-pulse { animation: gs-beacon-pulse 1.8s ease-in-out infinite; }
+  /* F3 seam (spec §2): supply markers fade as a CLASS, never unmount. Teardown
+     and rebuild at the seam IS the jank the crossfade exists to remove, and it
+     would drop any open card with it (spec §2.6).
+     The WHOLE transition list lives here rather than in styleMarker's inline
+     style, and that is load-bearing: an inline "transition" shorthand beats a
+     class rule outright, so a class-only opacity transition would be silently
+     overridden and the seam would hard-cut. Keeping the list in CSS is also
+     what lets the reduced-motion block below zero it without !important.
+     opacity DOES need !important: styleMarker writes an inline el.style.opacity
+     for the dim treatment, and the seam must win over it.
+     pointer-events off while faded so an invisible pin never steals a tap from
+     the bubble underneath (paint is not interactivity, spec §2.1). */
+  .gs-supply { transition: opacity 220ms ease-out, width .18s, height .18s, box-shadow .18s, border-color .18s; }
+  /* visibility, not only opacity: an opacity-0 element STAYS IN THE
+     ACCESSIBILITY TREE, so without this the up-to-60 faded pins keep announcing
+     their aria-labels to a screen reader while the map shows bubbles, and keep
+     taking tab-like traversal. visibility:hidden removes them from the tree.
+     The 0s 220ms DELAY is what preserves the fade: hiding waits for the opacity
+     transition to finish. On the UN-hide path this whole rule stops matching, so
+     .gs-supply's plain transition applies instead, visibility flips back
+     instantly and only the opacity animates.
+     THIS RULE'S POSITION IS LOAD-BEARING: it must come BEFORE the media block
+     below, which repeats this exact selector at exactly equal specificity
+     (0,2,0). Move it after and reduced motion silently stops zeroing this
+     state's duration and its visibility delay. */
+  .gs-agg-bubbles .gs-supply {
+    opacity: 0 !important;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 220ms ease-out, visibility 0s 220ms;
+  }
+  /* FOLDING (spec 2026-09-05-map-pin-declutter §3.4): below the seam an event is
+     represented exactly ONCE. A pill whose event is inside a cluster hides,
+     because that cluster's own cyan badge already draws it — the
+     .gs-agg-bubbles .gs-supply rule one class over, with refold() deciding
+     membership instead of the mode.
+     THE TRANSITION LIST LIVES ON THE BASE CLASS, never on the state class: the
+     state rule stops matching the instant gs-folded is removed, so a list held
+     there would fade OUT and SNAP back IN. Here both directions animate.
+     No !important on the transition: the pill writes no inline transition (the
+     lesson .gs-supply's own comment records — an inline shorthand beats a class
+     rule outright). The !important on opacity below is defensive parity with
+     that rule: the pill DOES write a whole inline cssText block, so an opacity
+     added to it later would silently win over the fold. */
+  /* WIDENED 2026-09-05 (spec 2026-09-05-map-demand-union §2.4): the amber demand
+     badge folds by the identical mechanism - its cluster's amber digit already
+     counts it - so it shares the identical fade. An ADDITIVE selector, never a
+     rename: every claim this stylesheet and its pins already make about
+     .gs-event is untouched, and the two kinds can never fade differently. */
+  .gs-event, .gs-gig { transition: opacity 220ms ease-out; }
+  /* Three declarations, three separate failures if one is dropped: opacity
+     hides it, visibility removes an aria-labelled ghost from the accessibility
+     tree (opacity:0 does NOT), and pointer-events keeps an invisible pill from
+     stealing the tap that belongs to the cluster underneath it — §3.5 makes the
+     cluster the tap target for a folded pill. The 0s 220ms delay is what lets
+     the fade finish before the hide; the un-fold path stops matching this rule
+     entirely, so visibility flips back instantly and only opacity animates.
+     POSITION IS LOAD-BEARING, exactly as the supply pair above: the media block
+     below repeats these selectors at equal specificity (0,1,0) and wins only by
+     coming later. */
+  .gs-folded {
+    opacity: 0 !important;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 220ms ease-out, visibility 0s 220ms;
+    /* A FOURTH declaration, added by the demand wave: the amber badge is the one
+       folding satellite that carries an infinite animation (.gs-pulse, the
+       beacon). opacity:0 does not stop it - box-shadow keeps compositing every
+       frame on an element nobody can see, on exactly the map that is already
+       busy enough to have clustered. No conflict with the fade: the pulse writes
+       box-shadow, the fold writes opacity.
+       IN CSS RATHER THAN A JS TOGGLE, and that is the load-bearing half. The
+       pulse class is added only when reduced motion is OFF, so a JS remove in
+       refold would have to re-consult reduceMotionFlag on every UNFOLD to know
+       whether it may put the class back - a second reader of a preference this
+       shell keeps single-sourced, and a permanently dead beacon the day someone
+       forgets. A cascade rule needs no memory: the class stays on the element
+       and simply stops animating while this rule matches.
+       THIS DECLARATION'S POSITION IS LOAD-BEARING TOO, for the same reason the
+       rule's own header says the media block must follow it: .gs-pulse (0,1,0)
+       and .gs-folded (0,1,0) are an exact specificity tie, so animation:none
+       wins ONLY because .gs-pulse is emitted ABOVE. Move the pulse rule below
+       this one - a plausible tidy-up, since the reduced-motion copy of it lives
+       just there - and every folded amber badge keeps compositing box-shadow at
+       1.8s intervals on an invisible element, with no visible symptom. Pinned by
+       tests/map-shell-fold.test.ts, mirroring the .gs-agg-bubbles .gs-supply
+       note above. */
+    animation: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .gs-pulse { animation: none; }
+    /* The crossfade still HAPPENS, it just happens instantly: zeroing duration
+       AND delay keeps every state change (fade, resize, ring, the visibility
+       step) correct and only removes the motion. BOTH selectors are listed
+       because the bubbles-mode rule above is the more specific one, so a bare
+       .gs-supply override would never reach the faded state — and this block
+       must stay BELOW that rule, since the repeat of its selector here ties it
+       on specificity and wins only by coming later. */
+    .gs-supply,
+    .gs-agg-bubbles .gs-supply { transition-duration: 0ms; transition-delay: 0s; }
+    /* The fold fade (spec §4.4), appended INSIDE this block rather than beside
+       it so the pinned cascade order above is untouched. BOTH classes: zeroing
+       only .gs-event would leave the folded state's own re-declared 220ms
+       shorthand (and its visibility delay) running. .gs-gig joined them with the
+       demand wave: omitting it would leave the amber badge the ONE satellite
+       that still slides under a reduced-motion preference. */
+    .gs-event, .gs-gig, .gs-folded { transition-duration: 0ms; transition-delay: 0s; }
+  }
+  /* The JS half of the reduced-motion guard, mirroring the block above. The
+     media query is a browser/OS preference and NATIVE HAS NO MEDIA QUERY AT ALL
+     (the same split the .gs-pulse comment documents), so the host's own
+     reducedMotion flag arrives through setDemandPoints and toggles .gs-rm on the
+     map container.
+     Its position relative to the media block is NOT load-bearing (an earlier
+     comment here claimed it was): .gs-rm.gs-agg-bubbles .gs-supply is strictly
+     MORE specific (0,3,0) than anything in that block, so it wins wherever both
+     apply whatever the order, and the bare .gs-rm .gs-supply sets the identical
+     two declarations. Specificity resolves it. The ONE ordering that does carry
+     weight in this stylesheet is .gs-agg-bubbles .gs-supply before the media
+     block — see the note on that rule. */
+  .gs-rm .gs-supply,
+  .gs-rm.gs-agg-bubbles .gs-supply { transition-duration: 0ms; transition-delay: 0s; }
+  /* The fold half of the same JS-flag guard (spec §4.4). A SEPARATE rule rather
+     than two more selectors on the one above, so the two pins that read that
+     rule's exact selector list keep reading it. Order-free: .gs-rm .gs-folded is
+     (0,2,0), strictly more specific than the media block's (0,1,0) copy, so
+     specificity resolves it wherever both apply. */
+  .gs-rm .gs-event,
+  .gs-rm .gs-gig,
+  .gs-rm .gs-folded { transition-duration: 0ms; transition-delay: 0s; }
+  /* Zoom (+/-) control (MapLibre NavigationControl). The search pill + filters
+     chip row are a React overlay ABOVE this iframe, so a top-right control
+     collides with them (founder: "the +/- overlaps the search bar"). Push it
+     DOWN clear of that chrome, and restyle from MapLibre's default white to the
+     app's dark theme. */
+  .maplibregl-ctrl-top-right { margin-top: 120px; margin-right: 10px; }
+  .maplibregl-ctrl-group {
+    background: #1a1626;
+    border: 1px solid #2c2540;
+    border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.4);
+    overflow: hidden;
+  }
+  .maplibregl-ctrl-group button { background: transparent; width: 34px; height: 34px; }
+  .maplibregl-ctrl-group button + button { border-top: 1px solid #2c2540; }
+  .maplibregl-ctrl-group button:hover { background: #14111f; }
+  /* MapLibre's +/- glyphs are dark SVGs; invert them to read on the dark fill. */
+  .maplibregl-ctrl-group button .maplibregl-ctrl-icon { filter: invert(0.85); }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+let POINTS = JSON.parse(decodeURIComponent(location.hash.slice(1) || '%5B%5D'));
+// THE OTHER TWO THIRDS of the cluster union (spec §3.1, widened by the
+// demand-union spec §2.1). Kept beside POINTS because all three are read
+// TOGETHER by refreshClusterSource and by the count gate: a creator, an event
+// and an open gig standing in the same city are members of ONE cluster now, not
+// three independent marker sets that happen to overlap. Each setter owns its own
+// assignment (setEventPoints, setDemandPoints); nothing else writes either one
+// except enablePicker's clear.
+let EVENT_POINTS = [];
+let DEMAND_POINTS = [];
+const C = {"bg":"#0c0a14","bgSoft":"#14111f","card":"#1a1626","border":"#2c2540","text":"#f2eefb","muted":"#9b93b3","mutedStrong":"#c9c4d6","accent":"#a855f7","accent2":"#ec4899","gold":"#fbbf24","green":"#34d399","acid":"#A3E635","acidHot":"#B6FF00","acidInk":"#141a08","amber":"#f59e0b","cyan":"#22d3ee","cyanInk":"#0b1e22","accentDeep":"#7c3aed"};
+
+// REVERT LEVERS (spec §8.2), interpolated from the ONE TS const each. Read the
+// exported consts in src/lib/mapHtml.ts for what each one restores when flipped.
+// EVENTS_IN_SOURCE is read at applyAggMode's CALL SITE (aggModeJs itself stays a
+// pure string), and by setEventPoints' pill gate from Task 5 on; DOCK_SATELLITES
+// is declared here and consumed by the dock pass in Task 6, so the lever exists
+// before the machinery it disables; EVENT_DOM_LIMIT is ALSO interpolated inside
+// aggModeJs (that copy is the one the count gate reads). DEMAND_IN_SOURCE is
+// read inside refreshClusterSource's own gig loop — the parent wave's I-1
+// lesson, one kind over: a lever read at only SOME of its sites gives a state
+// nobody has ever seen, and the arm reached for during an incident is the worst
+// place to discover that. There is no second site: E5 cut the count-gate term
+// and the GL gig layer, so the projection IS the whole arm.
+const EVENTS_IN_SOURCE = true;
+const DOCK_SATELLITES = true;
+const EVENT_DOM_LIMIT = 120;
+const DEMAND_IN_SOURCE = true;
+
+// THE DOCK PASS'S CONSTANTS (spec §4.1's closing paragraph), interpolated from
+// the ONE TS const each so the shell, the pure layout module and the tests read
+// the same numbers (the AGG_IN coupling, ADR-0012). dockPass below is the only
+// reader; dockLayout receives them as arguments rather than closing over them,
+// which is what lets node:test run the layout with no shell around it.
+// PIN_D / PIN_D_PRO / PIN_D_ACTIVE are NOT hoisted here on purpose: styleMarker
+// already interpolates them inline, and a second spelling beside it is exactly
+// the drift this file's own registry keeps warning about.
+const DOCK_GROUND_M = 2940;
+const DOCK_GAP_PX = 4;
+const DOCK_OVERLAP_BUBBLES_PX = 8;
+const DOT_R_PX = 10;
+const DOT_BADGE_STANDOFF_PX = 6;
+
+// One green (and one amber, one cyan): every translucent ring/glow derives
+// from the SAME hex the solid parts use, so a token retune moves everything.
+// The rings used to hand-type their rgba triples, and the green one had drifted
+// to a DIFFERENT green from C.green entirely (tailwind green-500 vs the theme's
+// emerald) — two greens on one pin, neither reachable from the token
+// (MAP-COMPONENTS.md F-15). Written without the old literal on purpose: the
+// tokens test asserts that triple appears NOWHERE in the document.
+// CONTRACT: hex is a 6-digit '#rrggbb' (the shape every C token has). A short
+// '#rgb', a named colour or an rgba() string yields NaN channels SILENTLY —
+// pass tokens, never user data.
+function rgbaOf(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+}
+
+// OUR OWN symbol layers, spelled ONCE (spec §3.3). retintMap's halo branch
+// below skips every id in here; before the badges there was one of them and the
+// escape was an id compare. Any symbol layer this shell adds must join the list
+// in the same commit, or the next retint sticker-outlines its digits.
+const OUR_SYMBOL_LAYERS = ['cluster-count', 'cluster-events', 'cluster-people', 'cluster-gigs', 'event-points'];
+
+// THE BADGE AND EVENT-DOT IMAGES (spec §3.3/§3.6). Five discs, drawn on an
+// offscreen canvas at map load and handed to MapLibre as ImageData.
+//
+// { pixelRatio: devicePixelRatio } is LOAD-BEARING: the canvas is sized in
+// DEVICE pixels so the disc is crisp on retina, and an image drawn at device
+// resolution but ADDED at the default ratio of 1 paints at double size. The
+// DIGIT is a symbol text-field, never part of the image, so nothing here has to
+// scale with a number.
+//
+// The approximate variants inset the disc by the ring width and stroke a DASHED
+// ring at the rim: the gaps show the map through, which is the same "inferred
+// coordinate, never a surveyed one's confident outline" treatment the DOM event
+// pill wears. Fills come from the C tokens (C.cyan / C.accentDeep) and are never
+// re-typed as hex — tests/map-shell-tokens.test.ts counts each layer hex EXACTLY
+// once in the whole document.
+function makeBadgeImages(map) {
+  const dpr = window.devicePixelRatio || 1;
+  const disc = (id, fill, r, dashed) => {
+    const px = Math.max(2, Math.round(r * 2 * dpr));
+    const cv = document.createElement('canvas');
+    cv.width = px;
+    cv.height = px;
+    const ctx = cv.getContext('2d');
+    if (!ctx) return; // no 2d context (a headless/blocked canvas): draw nothing rather than throw on load
+    const c = px / 2;
+    const ring = 2 * dpr; // the same 2px border weight the pills and bubbles wear
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.arc(c, c, dashed ? c - ring : c, 0, Math.PI * 2);
+    ctx.fill();
+    if (dashed) {
+      ctx.strokeStyle = fill;
+      ctx.lineWidth = ring;
+      ctx.setLineDash([3 * dpr, 2.5 * dpr]);
+      ctx.beginPath();
+      ctx.arc(c, c, c - ring / 2, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    map.addImage(id, ctx.getImageData(0, 0, px, px), { pixelRatio: dpr });
+  };
+  // THE ROUNDED SQUARE (demand-union E8). Same box as a disc, different shape:
+  // the legend's own Open-gigs swatch is a rounded square, so on a mixed dot
+  // wearing both shoulder badges the cyan events count and the amber gigs count
+  // read apart by SHAPE and not by colour alone — which is what a colour-blind
+  // viewer, or a viewer glancing at a 9px glyph, actually gets.
+  //
+  // The path is arcTo, NEVER roundRect: Safari 15 WebViews do not have
+  // roundRect, and a missing method here throws inside the 'load' handler and
+  // takes the whole map with it, not just this badge.
+  //
+  // No dashed/approximate variant, unlike the cyan disc: MapDemandPoint carries
+  // no precision fact at all (a gig's coordinate is the poster's pick or a city
+  // geocode, undistinguished by the time it reaches the host), so this badge
+  // cannot know one — and a confident outline that means nothing is better than
+  // a dashed one that implies a fact nobody measured.
+  const square = (id, fill, r, radius) => {
+    const px = Math.max(2, Math.round(r * 2 * dpr));
+    const cv = document.createElement('canvas');
+    cv.width = px;
+    cv.height = px;
+    const ctx = cv.getContext('2d');
+    if (!ctx) return; // no 2d context (a headless/blocked canvas): draw nothing rather than throw on load
+    const rad = radius * dpr; // the corner scales with everything else on this canvas
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.moveTo(rad, 0);
+    ctx.lineTo(px - rad, 0);
+    ctx.arcTo(px, 0, px, rad, rad);
+    ctx.lineTo(px, px - rad);
+    ctx.arcTo(px, px, px - rad, px, rad);
+    ctx.lineTo(rad, px);
+    ctx.arcTo(0, px, 0, px - rad, rad);
+    ctx.lineTo(0, rad);
+    ctx.arcTo(0, 0, rad, 0, rad);
+    ctx.closePath();
+    ctx.fill();
+    map.addImage(id, ctx.getImageData(0, 0, px, px), { pixelRatio: dpr });
+  };
+  disc('gs-badge-cyan', C.cyan, 9, false);
+  disc('gs-badge-cyan-approx', C.cyan, 9, true);
+  disc('gs-badge-accent', C.accentDeep, 9, false);
+  disc('gs-event-dot', C.cyan, 10, false);
+  disc('gs-event-dot-approx', C.cyan, 10, true);
+  square('gs-badge-amber', C.amber, 9, 3);
+}
+
+// Gozo's retintMap, night edition: repaint every positron layer to the
+// Gigshot palette instead of swapping tile providers.
+function retintMap(map) {
+  const LAND = C.bg, LAND_ALT = C.bgSoft;
+  // WATER used to be '#070510' — visually identical to LAND (C.bg) at a
+  // glance, so zoomed out to continent/country scale (fill layers only, no
+  // roads/buildings yet) the map read as a featureless void: no coastline,
+  // no borders, nothing to anchor on. Now a clearly-distinct deep blue-black
+  // so land vs. water reads immediately, while staying in the night palette.
+  const WATER = '#0e1526', WATER_ALT = '#0a0f1c';
+  const BUILDING = C.card, BUILDING_OUTLINE = C.border;
+  const ROAD = '#211b31', ROAD_CASING = C.border, ROAD_MAJOR = '#352b4e';
+  const TEXT = C.muted, TEXT_SOFT = '#6f6788', TEXT_HALO = C.bg;
+  // Subtle but visible country-outline tone — the only other landmark visible
+  // at low zoom besides the coastline, so a zoomed-out map reads as "a world"
+  // rather than a void between coast and the first city label.
+  const BOUNDARY = '#3a3354';
+  for (const layer of map.getStyle().layers ?? []) {
+    const id = layer.id.toLowerCase();
+    if (layer.type === 'background') {
+      map.setPaintProperty(layer.id, 'background-color', LAND);
+    } else if (layer.type === 'fill') {
+      if (id.includes('water')) {
+        map.setPaintProperty(layer.id, 'fill-color', WATER);
+      } else if (id.includes('building')) {
+        map.setPaintProperty(layer.id, 'fill-color', BUILDING);
+        map.setPaintProperty(layer.id, 'fill-outline-color', BUILDING_OUTLINE);
+      } else if (id.includes('parking') || id.includes('pedestrian') || id.includes('transportation') || id.includes('aeroway')) {
+        map.setPaintProperty(layer.id, 'fill-color', ROAD);
+        map.setPaintProperty(layer.id, 'fill-outline-color', ROAD);
+      } else if (id.includes('landuse') || id.includes('park') || id.includes('wood')) {
+        map.setPaintProperty(layer.id, 'fill-color', LAND_ALT);
+      } else if (id.includes('landcover') || id.includes('land')) {
+        map.setPaintProperty(layer.id, 'fill-color', LAND);
+      }
+    } else if (layer.type === 'line') {
+      if (id.includes('water')) {
+        map.setPaintProperty(layer.id, 'line-color', WATER_ALT);
+      } else if (id.includes('boundary') || id.includes('admin')) {
+        // Country/admin outlines — the other landmark visible at continent
+        // zoom besides the coastline. Left at the stylesheet default before,
+        // these blended into the near-black fills; a subtle but visible tone
+        // makes borders read without competing with roads/pins up close.
+        map.setPaintProperty(layer.id, 'line-color', BOUNDARY);
+      } else if (id.includes('highway') || id.includes('railway') || id.includes('road') || id.includes('tunnel') || id.includes('bridge') || id.includes('aeroway')) {
+        const isCasing = id.includes('casing') || id.includes('outline');
+        const isMajor = id.includes('motorway') || id.includes('trunk') || id.includes('primary') || id.includes('major');
+        map.setPaintProperty(layer.id, 'line-color', isCasing ? ROAD_CASING : isMajor ? ROAD_MAJOR : ROAD);
+      }
+    } else if (layer.type === 'symbol') {
+      // BASEMAP labels only. This branch halo-writes EVERY symbol layer in the
+      // style, and OUR OWN symbol layers carry DELIBERATELY different treatments
+      // (cluster-count's translucent rgbaOf(C.bg, 0.6) halo at 1.5; the badges'
+      // and the event dot's dark ink with no halo at all, see
+      // ensureClusterLayers). Today they survive only because retintMap happens
+      // to run on 'load' before any point push has created them: an ordering
+      // accident, not a rule. A later retint (a theme toggle, a style reload,
+      // any re-run after points exist) would silently overwrite them with the
+      // opaque basemap halo and every digit would gain a sticker outline.
+      // Skip the whole SET by id so the invariant is enforced rather than
+      // incidental — one list, declared above, that a new symbol layer joins.
+      if (OUR_SYMBOL_LAYERS.includes(layer.id)) continue;
+      const isMinor = id.includes('road') || id.includes('poi') || id.includes('housenumber');
+      try {
+        map.setPaintProperty(layer.id, 'text-color', isMinor ? TEXT_SOFT : TEXT);
+        map.setPaintProperty(layer.id, 'text-halo-color', TEXT_HALO);
+        map.setPaintProperty(layer.id, 'text-halo-width', 1.2);
+      } catch (e) {}
+    }
+  }
+}
+
+// PRO ring: the gozo Partner treatment — slightly larger, a soft ring,
+// never louder. Restraint is the point.
+const PRO_RING = '0 0 0 3px rgba(251,191,36,0.35)';
+
+// Travel (presence-window) markers are GREEN — "they're traveling HERE", as
+// opposed to the accent (purple) HOME pin. Differentiated by colour AND a glyph
+// (a ✈ corner badge) + a square-ish shape cue, never colour alone (a11y).
+const TRAVEL = C.green;
+const TRAVEL_RING = '0 0 0 3px ' + rgbaOf(C.green, 0.35);
+
+// Identity accent per pin: DJ pins keep ACID GREEN on the map ONLY (founder
+// call 2026-07-13, theme.ts mapDjAccent) — the app-wide acid retirement never
+// applied to the map surface. Availability treatments (confirmed green square,
+// gold PRO ring) are STATES, not identities, and take precedence.
+function identColor(p) { return p.vertical === 'dj' ? C.acid : C.accent; }
+// Active-pin glow, per vertical (was hardcoded purple) — derived from the same
+// hex identColor/identGradient paint with, so there is one acid and one purple.
+function identGlow(p) {
+  return '0 4px 14px ' + (p.vertical === 'dj' ? rgbaOf(C.acid, 0.6) : rgbaOf(C.accent, 0.6));
+}
+// Active-pin face + popup CTA gradient, per vertical.
+function identGradient(p) {
+  return p.vertical === 'dj'
+    ? 'linear-gradient(135deg, ' + C.acid + ', ' + C.acidHot + ')'
+    : 'linear-gradient(135deg, ' + C.accent + ', ' + C.accent2 + ')';
+}
+
+// "Load as you zoom": the profile photo only paints onto the pin at/above this
+// zoom. Far out (continent view) pins stay cheap emoji tiles and NO image is
+// requested; as you zoom into a city the photos load for the handful on screen.
+// Mirrored as the literal 6 in aggModeJs's cold-start branch (zoom < 6) —
+// that string is evaluated standalone in tests/new Function and cannot read
+// this const, so the two 6s are kept in sync by this comment pair only (same
+// rationale as the DOM_MARKER_LIMIT/60 pair below).
+const PHOTO_ZOOM = 6;
+
+// styleMarker now takes the whole point so it can paint a photo OR the emoji.
+// (Kept the name + (el, p, active) shape; every caller passes the point.)
+function styleMarker(el, p, active) {
+  // CONFIRMED-here = a presence window covers the queried date (availState), or,
+  // for older callers, simply a via note. Green, distinct ring, and a slightly
+  // rounded SQUARE (not a circle) — a shape cue so it reads as "confirmed" even
+  // without colour. REACHABLE (home fallback) points keep the round accent
+  // treatment, and are DIMMED to read as the softer "ask if they can travel".
+  const confirmed = p.availState ? p.availState === 'confirmed' : !!p.via;
+  const reachable = p.availState === 'reachable';
+  // The three diameters are INTERPOLATED from map-dock-js.ts (PIN_D / PIN_D_PRO
+  // / PIN_D_ACTIVE), not hand-typed here any more: the dock pass measures an
+  // anchor with the same numbers this function paints it with, and two spellings
+  // would place every satellite against a pin of the wrong size.
+  const base = p.pro ? 38 : 34;
+  const size = active ? base + 6 : base;
+  // Do NOT set an inline CSS position here. MapLibre positions the marker root
+  // via its .maplibregl-marker class (position:absolute) plus an inline
+  // transform; an inline 'relative' overrides that class and drops every pin
+  // back into DOCUMENT FLOW, so pins stack in a vertical column down the map
+  // instead of sitting at their coordinates (the "map is completely off" bug,
+  // present since cfffe5e). z-index still applies (the class makes the element
+  // positioned), and the rings/photo are box-shadow/background on this same
+  // element, so nothing here needs its own positioning context.
+  // (This function body lives inside the shell template literal: no backticks
+  // in comments here, they terminate the string and break build:shell.)
+  el.style.width = size + 'px';
+  el.style.height = size + 'px';
+  // Shape cue: confirmed pins are rounded-squares, reachable/home pins are circles.
+  el.style.borderRadius = confirmed ? '30%' : '50%';
+  el.style.boxSizing = 'border-box';
+  // Dim reachable (home-fallback) pins so confirmed pins read as the answer;
+  // confirmed (or no availState) pins stay full strength.
+  // Dim only when the host flagged it (a relative signal: reachable AND there's a
+  // confirmed pin to contrast with) — never dim the whole map on the default view.
+  el.style.opacity = p.dim ? '0.55' : '1';
+  // Reachable/home pins wear the OWNER's identity accent (acid for DJ, purple
+  // otherwise — identColor); confirmed pins keep the green availability
+  // treatment, which outranks identity because it answers the date question.
+  const borderColor = active ? C.text : confirmed ? TRAVEL : identColor(p);
+  el.style.border = '2px solid ' + borderColor;
+  const baseShadow = active
+    ? (confirmed ? '0 4px 14px ' + rgbaOf(C.green, 0.6) : identGlow(p))
+    : '0 2px 8px rgba(0,0,0,.5)';
+  // Confirmed ring (green) takes precedence over the PRO ring so the "here on
+  // your date" signal is never lost; reachable PRO pins keep the gold ring.
+  const ring = confirmed && !active ? TRAVEL_RING : p.pro && !active ? PRO_RING : '';
+  el.style.boxShadow = ring ? baseShadow + ', ' + ring : baseShadow;
+  // Own gig pins are draggable → a grab cursor signals "move me"; everyone
+  // else's keep the plain pointer.
+  el.style.cursor = p.editable ? 'grab' : 'pointer';
+  el.style.zIndex = active ? '10' : confirmed ? '3' : p.pro ? '2' : '1';
+  // No inline transition here. The list moved to the .gs-supply CSS rule (see
+  // the <style> block) because the seam's opacity crossfade has to share it: an
+  // inline "transition" shorthand beats a class rule, so an inline list would
+  // silently override the seam's fade and turn the crossfade into a hard cut.
+  // Same move makes the reduced-motion override actually reachable.
+  if (p.avatarUrl && map.getZoom() >= PHOTO_ZOOM) {
+    // Photo face: the image fills the circle; no emoji, no gradient.
+    el.textContent = '';
+    el.style.background = C.card;
+    el.style.backgroundImage = "url('" + String(p.avatarUrl).replace(/'/g, '%27') + "')";
+    el.style.backgroundSize = 'cover';
+    el.style.backgroundPosition = 'center';
+  } else {
+    // Emoji face (default, and the fallback when there's no photo or we're zoomed out).
+    el.style.backgroundImage = 'none';
+    el.style.background = active ? identGradient(p) : C.card;
+    el.style.display = 'flex';
+    el.style.alignItems = 'center';
+    el.style.justifyContent = 'center';
+    el.style.fontSize = Math.round(size * 0.5) + 'px';
+    el.textContent = p.emoji;
+  }
+  // ✓ corner badge LAST — the face paths above set el.textContent (which would
+  // drop a child badge), so the badge is (re)attached after the face is painted.
+  // The non-colour glyph cue for confirmed markers; removed when reachable/home.
+  let badge = el.querySelector('.gigshot-travel-badge');
+  if (confirmed) {
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.className = 'gigshot-travel-badge';
+      badge.textContent = '✓';
+      el.appendChild(badge);
+    }
+    const bs = Math.max(14, Math.round(size * 0.46));
+    badge.style.cssText =
+      'position:absolute;top:-6px;right:-6px;width:' + bs + 'px;height:' + bs + 'px;' +
+      'border-radius:50%;background:' + TRAVEL + ';color:#04210f;font-size:' + Math.round(bs * 0.62) + 'px;' +
+      'line-height:' + bs + 'px;text-align:center;font-weight:700;box-shadow:0 1px 4px rgba(0,0,0,.5);' +
+      'pointer-events:none;z-index:1;';
+  } else if (badge) {
+    badge.remove();
+  }
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+
+// Bridge that works in both hosts: React Native WebView (postMessage to RN)
+// and a plain iframe on web (postMessage to the parent window).
+window.notify = function (payload) {
+  const json = JSON.stringify(payload);
+  // Lock the target origin: the shell is served same-origin as the app, so the
+  // parent is always our own origin. '*' would let any embedder read the
+  // payload (incl. a member's home coordinates) if the frame were ever embedded
+  // cross-origin. (Native WebView has no origin concept — RN bridge as-is.)
+  if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(json);
+  else window.parent.postMessage(json, window.location.origin);
+};
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: 'https://tiles.openfreemap.org/styles/positron',
+  center: [6.5, 49.5],
+  zoom: 3.4,
+  attributionControl: false,
+  // fadeDuration 0: kill MapLibre's default 300ms symbol fade-in. The cluster
+  // count labels are a symbol layer; with the default fade they re-fade-in on
+  // every source.setData() (a 'Search as I move' re-query), making the cluster
+  // numbers blink. 0 = labels pop instead — snappier, no flicker. (mapbox-gl-js #5716)
+  fadeDuration: 0,
+});
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+
+// All our camera moves go through pmove (flyToPoint/fitPoints/focusCity/cluster
+// zoom). It used to set a "programmatic" flag so the removed viewport-search
+// could tell our own moves from a human pan; with that feature gone it's a plain
+// passthrough, kept so its many callers don't have to change.
+function pmove(fn) { fn(); }
+
+// City-scale camera floor, single-sourced from CITY_ZOOM in src/lib/mapHtml.ts
+// (see its doc comment for the metres-per-pixel arithmetic behind 12.5).
+const CITY_ZOOM = 12.5;
+
+// A caller-supplied zoom is HONOURED, not clamped. An earlier pass floor-clamped
+// it to CITY_ZOOM on the premise that "every caller asks for 11-12"; that premise
+// is false — MapSearchPill's creator-result fly-to asks for 10 deliberately, and
+// selectMyTourCity passes the gazetteer's per-place zoom. Silently rewriting an
+// explicit caller intent to make the de-overlap more visible is the wrong layer:
+// if near-me should land tighter, that belongs at its call site (useMapCamera),
+// where it can be reviewed against the "empty-looking first frame for suburb
+// users" trade, not hidden in a global override. CITY_ZOOM remains the DEFAULT
+// when a caller supplies no zoom at all.
+window.flyToPoint = function (lng, lat, zoom) {
+  const want = (typeof zoom === 'number' && zoom > 0) ? zoom : CITY_ZOOM;
+  pmove(() => map.flyTo({ center: [lng, lat], zoom: want, duration: 900 }));
+};
+
+// "Show my home + travels" fit: frame an arbitrary set of [lng,lat] pairs.
+// maxZoom 9 keeps a single-point or tight cluster from rocketing to street
+// level; setPadding(0) first sidesteps the known maplibre bug where successive
+// fitBounds padding values accumulate (each call would otherwise add to the
+// last, slowly squeezing the framed area). Single point → a plain flyTo.
+window.fitPoints = function (coords, zoom) {
+  if (!coords || !coords.length) return;
+  if (coords.length === 1) {
+    pmove(() => map.flyTo({ center: coords[0], zoom: zoom || 9, duration: 900 }));
+    return;
+  }
+  const b = new maplibregl.LngLatBounds();
+  for (const c of coords) b.extend(c);
+  pmove(() => {
+    map.setPadding(0);
+    map.fitBounds(b, { padding: 70, maxZoom: zoom || 9, duration: 900 });
+  });
+};
+
+// Location picker: a single DRAGGABLE marker the member positions to set their
+// own home point (for a place the city dataset doesn't cover). Drag the marker
+// OR click the map to move it; both report {type:'picked', lng, lat} so the host
+// can save it. Switches the shell out of browse mode (no creator pins/clusters).
+let pickerMarker = null;
+window.enablePicker = function (lng, lat) {
+  clearMarkers();
+  // Clear ALL THREE arrays of the union, then refresh, so the arrays and the
+  // signature agree — the picker owns this canvas and shows no supply at all.
+  // The guard is DEFENSIVE, not load-bearing: the picker document DOES create
+  // the source on load, because its own map.on('load') calls setPoints before it
+  // notifies ready, so the layers exist there too, over an empty source, and
+  // applyAggMode's pickerMarker bail keeps them inert. Clearing POINTS is NEW
+  // (this used to leave it, and fitAll/focusCity read it) and is inert because
+  // the picker never fits — stated rather than hidden. EVENT_POINTS and
+  // DEMAND_POINTS are already empty here: the picker is a separate shell document
+  // (LocationPicker.web.tsx) that never receives an event or demand push.
+  if (map.getSource('creators')) {
+    POINTS = [];
+    EVENT_POINTS = [];
+    DEMAND_POINTS = [];
+    refreshClusterSource();
+  }
+  const start = (typeof lng === 'number' && typeof lat === 'number') ? [lng, lat] : map.getCenter().toArray();
+  if (pickerMarker) pickerMarker.remove();
+  const el = document.createElement('div');
+  el.textContent = '📍';
+  el.style.fontSize = '36px';
+  el.style.lineHeight = '36px';
+  el.style.cursor = 'grab';
+  // Draggable affordance: a soft accent ring + drop shadow so the pin reads as a
+  // movable handle, not a static label. (Cheap text-shadow/filter — no extra DOM.)
+  el.style.filter = 'drop-shadow(0 3px 6px rgba(0,0,0,.55))';
+  el.style.textShadow = '0 0 0 ' + C.accent + ', 0 0 14px rgba(168,85,247,.45)';
+  el.setAttribute('aria-label', 'Your location. Drag to move.');
+  pickerMarker = new maplibregl.Marker({ element: el, draggable: true, anchor: 'bottom' })
+    .setLngLat(start)
+    .addTo(map);
+  pickerMarker.on('dragstart', () => { el.style.cursor = 'grabbing'; });
+  pickerMarker.on('dragend', () => {
+    el.style.cursor = 'grab';
+    const ll = pickerMarker.getLngLat();
+    window.notify({ type: 'picked', lng: ll.lng, lat: ll.lat });
+  });
+  // Existing-pin / search default: open ON the saved point at a street-legible
+  // zoom (14), never the coarse continent default. A bare enablePicker() with no
+  // coords still falls back to the current center (e.g. the gig map's last view).
+  const openZoom = (typeof lng === 'number' && typeof lat === 'number') ? 14 : 11;
+  pmove(() => map.flyTo({ center: start, zoom: openZoom, duration: 600 }));
+  window.notify({ type: 'picked', lng: start[0], lat: start[1] }); // report the starting point
+};
+
+// Exit picker mode: drop the draggable pin so the host can restore the discovery
+// map (it re-pushes setPoints afterwards). No-op when the picker isn't active.
+window.disablePicker = function () {
+  if (pickerMarker) { pickerMarker.remove(); pickerMarker = null; }
+  // The seam no-ops for as long as the picker owns the canvas, so aggMode and
+  // the paint state are stale BY DEFINITION on exit. Re-evaluate here instead of
+  // waiting for the host's re-push or the next zoomend (pickerMarker is already
+  // null above, so applyAggMode's own guard lets this call through).
+  applyAggMode();
+};
+
+// Move the picker pin programmatically — the search-box + "use my location"
+// path. flyToPoint alone only pans the CAMERA; it does NOT move the draggable
+// marker, so the pin would be left behind. setPickerPoint moves the marker,
+// flies to it, and emits the SAME {type:'picked'} the drag/click emit, so the
+// host saves it identically. No-op when the picker isn't enabled (the shell is
+// shared with the discovery map — a stray call there must not paint a pin).
+window.setPickerPoint = function (lng, lat, zoom) {
+  if (!pickerMarker) return; // picker not active — ignore (shared-shell guard)
+  if (typeof lng !== 'number' || typeof lat !== 'number') return;
+  pickerMarker.setLngLat([lng, lat]);
+  pmove(() => map.flyTo({ center: [lng, lat], zoom: zoom || 13, duration: 700 }));
+  window.notify({ type: 'picked', lng: lng, lat: lat });
+};
+
+// Single long-lived map instance: periods swap markers via setPoints —
+// remounting MapLibre (new WebGL context per period) stalls its render loop.
+let markers = [];
+// Demand-anchored context layer (Phase 3): OPEN REQUESTS (unmet demand). A
+// SEPARATE, simple, non-clustered marker set — NEVER routed through setPoints /
+// syncMarkers / the cluster source. Kept distinct so the demand backdrop and the
+// supply pins can never interfere with each other.
+let demandMarkers = [];
+// Event layer: upcoming EVENTS (event_supply, counts only). A THIRD marker set,
+// kept as separate from setPoints/syncMarkers/the cluster source as the demand
+// badges are, for the same reason: three layers that answer three different
+// questions (who is bookable / who is hiring / what is happening) must never be
+// able to interfere with each other's rendering.
+let eventMarkers = [];
+// id -> marker, so setPoints can DIFF (keep unchanged pins) instead of wiping +
+// rebuilding every call — the latter made pins jump/flicker during "search as I
+// move" (every settle tore down and recreated all markers).
+let markerById = {};
+// The single creator popup that may be open. Opening another (a different marker,
+// or a clustered point) closes this one first, so popups never overlay/stack.
+let openPopup = null;
+// Click-outside-to-close (user control & freedom): a click on the map BACKGROUND
+// dismisses the open card. popupJustOpened guards the very click that opened it —
+// in this shell the opening click also reaches map.on('click') (same tick), and
+// closing there would re-create the old "flash" bug. markPopupOpen tracks the
+// open popup AND arms the guard, cleared on the next tick so a LATER background
+// click closes. Every popup (marker / cluster point / demand) routes through it.
+let popupJustOpened = false;
+function markPopupOpen(p) {
+  if (openPopup && openPopup !== p) openPopup.remove();
+  openPopup = p;
+  popupJustOpened = true;
+  setTimeout(function () { popupJustOpened = false; }, 0);
+}
+// Last UNION signature pushed to the cluster source (creators AND events) — see
+// refreshClusterSource, which owns both the spelling and the short-circuit.
+let lastClusterSig = null;
+
+function clearMarkers() {
+  for (const m of markers) m.remove();
+  markers = [];
+  markerById = {};
+}
+
+function popupCard(p) {
+  const proBadge = p.pro
+    ? '<span style="font-size:10px;font-weight:700;color:' + C.gold + ';border:1px solid rgba(251,191,36,.4);border-radius:99px;padding:1px 7px;margin-left:6px">PRO</span>'
+    : '';
+  // The role line + CTA follow the pin's vertical (subject partition). A DJ pin
+  // gets the ACID gradient, so its CTA ink is C.acidInk — the accent's DARK
+  // counterpart. White ink on lime measured ~1.5:1 (MAP-COMPONENTS.md F-05);
+  // everyone else keeps white on the purple gradient, which is fine.
+  const ident = identColor(p);
+  const ctaInk = p.vertical === 'dj' ? C.acidInk : '#fff';
+  return (
+    '<div style="width:225px;padding:12px 14px;font-family:system-ui,sans-serif">' +
+      '<div style="font-size:16px;font-weight:800;color:' + C.text + '">' + esc(p.name) + proBadge + '</div>' +
+      '<div style="font-size:12px;font-weight:600;color:' + ident + ';margin:2px 0 4px">' + esc(p.role) + ' · ' + esc(p.city) + '</div>' +
+      // The ★ rating ALONE (Task 3b / D5): the popup used to append a
+      // hand-rolled "from €X" that could contradict the rail card one tap
+      // away. Pins speak availability; prices live on surfaces that run
+      // through service-price.ts. (NO backticks in this comment on purpose —
+      // this whole shell is ONE template literal, the AGENTS.md scar.)
+      '<div style="font-size:13px;color:' + C.mutedStrong + '">' + esc(p.ratingLabel) + '</div>' +
+      // Last-active (0040): "● Active Xh ago" — already formatted by the host.
+      (p.lastActiveLabel ? '<div style="font-size:11px;font-weight:600;color:' + C.accent2 + ';margin-top:4px">● Active ' + esc(p.lastActiveLabel) + '</div>' : '') +
+      // Availability status line (gold/accent), styled like the old via line.
+      // availLabel supersedes via — it frames the pin as the answer to who can
+      // do my gig on this date (confirmed here vs reachable/ask-to-travel).
+      (p.availLabel
+        ? '<div style="font-size:11px;font-weight:600;color:' + C.gold + ';margin-top:4px">' + esc(p.availLabel) + '</div>'
+        : p.via
+          ? '<div style="font-size:11px;font-weight:600;color:' + C.gold + ';margin-top:4px">✈ ' + esc(p.via) + '</div>'
+          : '') +
+      // No inline onclick: the id is bound via a DOM closure on popup open (see
+      // makeMarker) — an HTML-attribute + JS-string double context is the wrong
+      // place for entity escaping (the demand pin's gs-respond lesson applies
+      // identically here; p.id is a server UUID today, but the closure removes
+      // the footgun regardless of the id source).
+      '<button class="gs-view-profile" ' +
+        'style="margin-top:10px;width:100%;padding:9px 0;border:none;border-radius:99px;font-weight:700;font-size:13px;color:' + ctaInk + ';cursor:pointer;background:' + identGradient(p) + '">View profile</button>' +
+    '</div>'
+  );
+}
+
+// THE EVENT CARD, ONE SPELLING (spec §3.6). Both event surfaces render this:
+// the DOM pill's popup (setEventPoints) and the GL event dot's popup past the
+// DOM limit (the 'event-points' click handler). Two copies is how a pill and a
+// dot end up disagreeing about the same event — the popupCard precedent, one
+// layer over.
+//
+// The argument is EITHER a host EventPin or a GL feature's properties. Those
+// differ in exactly one way that matters: the tile encoder DROPS null and
+// undefined properties, so whenLine/crewBand ARRIVE MISSING rather than null on
+// the GL path. Every optional line is therefore truthiness-gated, never
+// concatenated — a bare concat prints the word 'undefined' on the card.
+//
+// DATES ARE THE PAGE'S OWN STRINGS (D5, ADR-0030's two facts): whenLine is the
+// event's SCHEDULE, crewBand is who is on site and when, and this shell composes
+// neither. It used to build a fromDate-toDate range here, which is the /scene
+// scar — one surface rendering a second, locally-composed date line that could
+// disagree with the page it links to.
+function eventPopupHtml(ev) {
+  const going = typeof ev.goingCount === 'number' ? ev.goingCount : 0;
+  // precise === false means the coordinate is area-scale, not a surveyed point
+  // (see the pill's own note in setEventPoints). The 'near' line below is shown
+  // ONLY then: on a precise pin it would claim the event is somewhere it is not.
+  const approx = ev.precise === false;
+  return (
+    '<div style="width:210px;padding:12px 14px;font-family:system-ui,sans-serif">' +
+      '<div style="font-size:13px;font-weight:800;color:' + C.cyan + '">🎪 ' + esc(ev.name || 'Event') + '</div>' +
+      // Zero-crew face (Z3): the count line becomes the honest story line.
+      // esc() on the count arm only — 'No crew here yet' is a literal.
+      '<div style="font-size:12px;color:' + C.mutedStrong + ';margin-top:6px">' + (going ? esc(going) + ' going' : 'No crew here yet') + '</div>' +
+      (ev.gigCount ? '<div style="font-size:12px;color:' + C.mutedStrong + ';margin-top:2px">' + esc(ev.gigCount) + ' open ' + (ev.gigCount === 1 ? 'gig' : 'gigs') + '</div>' : '') +
+      // The event's OWN schedule line, or the honest-absence face. The two are
+      // mutually exclusive upstream (placeViewModel sets datesUnconfirmed only
+      // when there is no renderable schedule), and a real date wins if they ever
+      // both arrive: a date is never less true than 'unconfirmed'.
+      (ev.whenLine
+        ? '<div style="font-size:11px;color:' + C.muted + ';margin-top:2px">' + esc(ev.whenLine) + '</div>'
+        : ev.datesUnconfirmed
+          ? '<div style="font-size:11px;color:' + C.muted + ';margin-top:2px">Dates unconfirmed</div>'
+          : '') +
+      // A SEPARATE line, never merged with the one above: the crew band is when
+      // people are ON SITE, which is a different fact from when the event runs.
+      (ev.crewBand ? '<div style="font-size:11px;color:' + C.muted + ';margin-top:2px">' + esc(ev.crewBand) + '</div>' : '') +
+      (approx && ev.nearCity
+        ? '<div style="font-size:11px;color:' + C.muted + ';margin-top:2px">near ' + esc(ev.nearCity) + '</div>'
+        : '') +
+      // The CTA wears the event-pill family treatment (translucent cyan + cyan
+      // border + near-white ink), NOT solid cyan with dark ink: the app-wide
+      // button rule is white text (ui.tsx btnText), and white only reads on a
+      // deep fill — solid C.cyan is too light for it, which is how this button
+      // ended up the one dark-ink outlier (founder call, 2026-08-19: white like
+      // every other button). Spell the hue as C.cyan only: the token test counts
+      // the raw hex ONCE per document. Zero-crew CTA (Z3): same class, same
+      // notify route — only the label changes, because the place page's
+      // zero-crew face already offers I'm-available and 'See who's going' over
+      // nobody would be a lie. NO inline onclick: every caller binds the class
+      // through a DOM closure after the popup is attached.
+      '<button class="gs-event-going" ' +
+        'style="margin-top:10px;width:100%;padding:8px;border:2px solid ' + C.cyan + ';border-radius:8px;cursor:pointer;' +
+        'background:' + rgbaOf(C.cyan, 0.22) + ';color:#e6fbff;font-weight:800;font-size:13px">' + (going ? 'See who’s going' : 'Be the first') + '</button>' +
+    '</div>'
+  );
+}
+
+// DOM emoji markers below this count (the expressive path); MapLibre's
+// built-in GeoJSON clustering above it (the 100k path — thousands of points
+// stay smooth because the GPU does the work, not the DOM). Mirrored as a
+// literal 60 inside aggModeJs's count gate (see that doc comment) — the mode
+// machine is evaluated standalone in tests/new Function and cannot read this
+// shell-scope const, so the two literals are kept in sync by this comment pair.
+const DOM_MARKER_LIMIT = 60;
+
+// Build ONE marker for a point (used by the diff below). Registered in both the
+// markers array (zoom-repaint iterates it) and markerById (the diff key).
+function makeMarker(p) {
+  const el = document.createElement('div');
+  el.setAttribute('aria-label', p.name);
+  // The seam fades this class (spec §2) and owns its transition list — see the
+  // .gs-supply rules in the <style> block. Set BEFORE styleMarker so the very
+  // first paint already has the transitions attached.
+  el.classList.add('gs-supply');
+  styleMarker(el, p, false);
+
+  // closeOnClick:false is deliberate. MapLibre opens this popup via the map
+  // click that the marker bubbles up (NOT a separate element listener — so we
+  // must NOT stopPropagation, or it never opens). A default closeOnClick would
+  // let that very opening click also close it → the "flash for a millisecond"
+  // bug. With it off, the popup stays; our pick handler (below) separately
+  // ignores clicks that land on a marker, so the map doesn't re-render and
+  // clear the pin. Clicking another marker / the ✕-less card toggles it.
+  const cardHtml = popupCard(p);
+  const popup = new maplibregl.Popup({ offset: 22, closeButton: false, closeOnClick: false, maxWidth: '250px', className: 'gigshot-popup' })
+    .setHTML(cardHtml);
+  // Seed the rendered-card cache that the syncMarkers repaint diffs against.
+  // Without the seed the first comparison is undefined-vs-fresh, which always
+  // reads as a change and forces one needless setHTML — and with it one focus
+  // steal (see the repaint's WHY note).
+  popup._gsHtml = cardHtml;
+  popup.on('open', () => {
+    markPopupOpen(popup);
+    // Restyle from the CURRENT payload, never the construction-time p (F-01).
+    // syncMarkers KEEPS this marker across pushes and repaints it in place, so a
+    // closure over p would repaint the pin back to how it looked when first drawn
+    // the moment its card opens — silently undoing a WHEN-scope flip or a photo
+    // that hydrated later. m._gigshotPoint is the live payload (the same read the
+    // zoomend repaint and dragend already do); the || p fallback covers the very
+    // first open. Referencing m before its declaration below is safe: these
+    // handlers only ever run on user interaction, long after construction.
+    const cur = m._gigshotPoint || p;
+    styleMarker(el, cur, true);
+    // Bind View-profile via a closure (p.id captured) — mirrors the demand pin's
+    // gs-respond binding; never interpolate an id into an onclick string. Capturing
+    // the id stays correct even though capturing the payload did not: id is the
+    // diff KEY, so a kept marker keeps its id by definition.
+    const pel = popup.getElement();
+    const btn = pel && pel.querySelector('.gs-view-profile');
+    if (btn) btn.onclick = () => window.notify({ type: 'creator', id: p.id });
+  });
+  popup.on('close', () => {
+    if (openPopup === popup) openPopup = null;
+    // Same live-payload read as 'open' — closing a card must not resurrect the
+    // construction-time style either.
+    const cur = m._gigshotPoint || p;
+    styleMarker(el, cur, false);
+  });
+
+  // Own gig pins are draggable so the provider repositions them straight from
+  // the map (the "move my pins" gesture). dragend reports the window + new coords
+  // to the host, which persists it via updatePresenceWindow. A click still opens
+  // the popup — maplibre only fires dragend after a real drag, so a tap never
+  // moves the pin by accident.
+  const m = new maplibregl.Marker({ element: el, draggable: !!p.editable }).setLngLat([p.lng, p.lat]).setPopup(popup).addTo(map);
+  if (p.editable) {
+    el.setAttribute('title', 'Drag to move your gig');
+    m.on('dragstart', () => {
+      el.style.cursor = 'grabbing';
+      if (openPopup) openPopup.remove(); // don't drag a pin with its card hanging open
+    });
+    m.on('dragend', () => {
+      el.style.cursor = 'grab';
+      const ll = m.getLngLat();
+      const lp = m._gigshotPoint || p;
+      window.notify({ type: 'window-moved', key: lp.windowKey, lng: ll.lng, lat: ll.lat });
+    });
+  }
+  m._gigshotPoint = p; // for the zoom repaint
+  markers.push(m);
+  markerById[p.id] = m;
+  return m;
+}
+
+// DIFF the on-map markers to the new set: keep the markers whose id persists
+// (no flicker — they stay exactly where they are), move any that changed coords,
+// add the genuinely-new, remove the gone. This is what stops the "pins jump all
+// over" during "search as I move" — only the delta touches the DOM.
+function syncMarkers(pts) {
+  const want = {};
+  for (const p of pts) want[p.id] = p;
+  for (let i = markers.length - 1; i >= 0; i--) {
+    const m = markers[i];
+    const id = m._gigshotPoint && m._gigshotPoint.id;
+    if (!want[id]) {
+      if (openPopup && m.getPopup && m.getPopup() === openPopup) openPopup = null;
+      m.remove();
+      markers.splice(i, 1);
+      delete markerById[id];
+    }
+  }
+  for (const p of pts) {
+    const existing = markerById[p.id];
+    if (existing) {
+      const lp = existing._gigshotPoint;
+      // Draggability is fixed at construction, so a pin that becomes (or stops
+      // being) the viewer's own editable gig must be REBUILT, not just moved —
+      // otherwise it'd keep the wrong draggable flag.
+      if (!!lp.editable !== !!p.editable) {
+        if (openPopup && existing.getPopup && existing.getPopup() === openPopup) openPopup = null;
+        existing.remove();
+        const idx = markers.indexOf(existing);
+        if (idx >= 0) markers.splice(idx, 1);
+        delete markerById[p.id];
+        makeMarker(p);
+        continue;
+      }
+      // Reposition when the payload moved — OR when the marker's LIVE position
+      // has drifted off the payload. A drag moves the DOM node without touching
+      // _gigshotPoint, so after a REFUSED save (pin-move-truth) the host
+      // re-pushes byte-identical data: lp equals p, yet the marker still sits
+      // where the drag DROPPED it. Comparing lp alone would skip setLngLat and
+      // strand that ghost pin; the live check snaps it home.
+      const live = existing.getLngLat();
+      if (lp.lng !== p.lng || lp.lat !== p.lat || live.lng !== p.lng || live.lat !== p.lat) {
+        existing.setLngLat([p.lng, p.lat]);
+      }
+      // Repaint on ANY payload change (F-01): the diff keeps the marker alive
+      // to avoid flicker, but a kept marker must still track its data — photos
+      // arriving after listCreators hydrates, dim/availState flips on a WHEN
+      // change, and the popup's last-active line all land here. The host's
+      // signature guard (useMapFrame) already ensures we only receive pushes
+      // that changed SOMETHING, so the stringify cost is bounded and rare.
+      const changed = JSON.stringify(lp) !== JSON.stringify(p);
+      existing._gigshotPoint = p;
+      if (changed) {
+        const pop = existing.getPopup && existing.getPopup();
+        const isOpen = !!(pop && pop.isOpen && pop.isOpen());
+        styleMarker(existing.getElement(), p, isOpen);
+        // The accessible name is set ONCE at construction, so a kept marker would
+        // keep announcing the old name while its card already shows the new one.
+        existing.getElement().setAttribute('aria-label', p.name);
+        if (pop) {
+          // Only touch the popup DOM when the RENDERED CARD actually differs.
+          // setHTML routes through maplibre's setDOMContent, which ends in
+          // _focusFirstElement (focusAfterOpen defaults to true): it moves
+          // DOCUMENT focus to the first focusable node in the card — our
+          // .gs-view-profile button. On web the map is an IFRAME inside the host
+          // page, so a needless refresh yanks the caret out of whatever the user
+          // is typing in (the search box). Scatter jitter alone moves a
+          // coordinate enough to set the change flag, so a byte-identical card
+          // is the COMMON case here, not the rare one — skipping it is both the
+          // focus fix and the churn fix.
+          const html = popupCard(p);
+          if (pop._gsHtml !== html) {
+            // Belt and braces for the genuinely-changed case: remember who had
+            // focus and hand it back if the refresh took it. (A CLOSED popup has
+            // no _container, so maplibre's focus grab is open-only — this costs
+            // nothing on the closed path.)
+            const active = document.activeElement;
+            pop.setHTML(html);
+            pop._gsHtml = html;
+            // A CLOSED popup rebinds its CTA in its own 'open' handler; an OPEN
+            // one just had its DOM replaced, so rebind now.
+            if (isOpen) {
+              const pel = pop.getElement();
+              const btn = pel && pel.querySelector('.gs-view-profile');
+              if (btn) btn.onclick = () => window.notify({ type: 'creator', id: p.id });
+            }
+            if (active && active !== document.activeElement && active.focus) active.focus();
+          }
+        }
+      }
+    } else {
+      makeMarker(p);
+    }
+  }
+}
+
+// "Load as you zoom": when crossing the PHOTO_ZOOM threshold, repaint the DOM
+// markers so photos appear (or drop back to emoji on zoom-out). Only the handful
+// of DOM markers (<=60) ever carry photos; the GL cluster path has none.
+let lastPhotoMode = null;
+map.on('zoomend', () => {
+  const photoMode = map.getZoom() >= PHOTO_ZOOM;
+  if (photoMode === lastPhotoMode) return; // only repaint when the threshold is crossed
+  lastPhotoMode = photoMode;
+  for (const m of markers) {
+    const p = m._gigshotPoint;
+    if (p) styleMarker(m.getElement(), p, m.getPopup() && m.getPopup().isOpen());
+  }
+});
+
+// Reduced motion, the SHELL-GLOBAL preference. Two-way on purpose, exactly like
+// the .gs-pulse guard: the @media query in the <style> block covers the
+// browser/OS preference, and NATIVE HAS NO MEDIA QUERY AT ALL, so the host's own
+// flag (threaded through setDemandPoints) is the only guard there. Mirrored onto
+// the container as .gs-rm, which the CSS keys off. ONE preference, read by both
+// consumers: the seam fade and the demand beacon pulse.
+let reduceMotionFlag = false;
+function setReduceMotion(on) {
+  reduceMotionFlag = !!on;
+  map.getContainer().classList.toggle('gs-rm', reduceMotionFlag);
+}
+
+// F3 (spec §2.1): the DISCRETE half of the seam, beside the photo-mode latch
+// above and built on the same pattern (own latch, own listener).
+//
+// It owns BOTH halves of the handover that a shader cannot decide for itself:
+// which side ACCEPTS TAPS (this flag plus the .gs-agg-bubbles class), and which
+// of TWO paint states the GL layers rest in (below). It flips at two separated
+// thresholds (hysteresis, inside aggModeFor) so pinch jitter across z6 can never
+// flap the layers, and only on zoomend so a mid-gesture flick never swaps tap
+// targets under the finger. It never touches the camera and never touches an
+// open popup: a card opened from a pin survives the seam (spec §2.6).
+let aggMode = null;
+// Which of the two paint states the GL layers currently CARRY. They are BORN
+// visible (ensureClusterLayers' addLayer paint values ARE the visible numbers
+// below), so 'visible' is the honest initial value, and this is a latch: a
+// zoomend storm must not re-set the seam's WHOLE identical paint set per
+// gesture.
+// CORRECTED 2026-09-06 (demand-union): this line said "five identical paint
+// properties" and the state description below said "the other four" — the
+// parent wave's numbers, already stale at nine and now eleven, while the body
+// 60 lines down said "eleven properties now, not five". No count is restated
+// here on purpose: tests/map-shell-agg.test.ts's allow-list over the seam's
+// setPaintProperty calls is the answer that cannot rot, and it is what forces a
+// twelfth property to be argued for.
+//   'visible' bubbles, by zoom OR by count. 0.25 on the clusters fill (the value
+//             the bubbles always had) and 1 on every other property in the
+//             set, at EVERY zoom —
+//             a count-forced >DOM_MARKER_LIMIT set needs them visible at street
+//             zoom too, since they are the only layers able to draw it.
+//   'hidden'  pins mode. Flat 0.
+let aggPaintApplied = 'visible';
+function applyAggMode() {
+  if (pickerMarker) return; // the picker owns this shell instance's canvas
+  // The EVENTS_IN_SOURCE lever lives HERE, at the call site, not inside
+  // aggModeJs: that string stays pure (it is new Function'd standalone in the
+  // tests), so switching the union off has to make the event term inert by
+  // passing 0 rather than by editing the machine.
+  const next = aggModeFor(aggMode, map.getZoom(), POINTS.length, EVENTS_IN_SOURCE ? EVENT_POINTS.length : 0);
+  if (next !== aggMode) {
+    aggMode = next;
+    map.getContainer().classList.toggle('gs-agg-bubbles', aggMode === 'bubbles');
+  }
+  // The paint is a pure function of the MODE — no second reading of the count
+  // gate here. aggModeFor already composes it (> DOM_MARKER_LIMIT means bubbles
+  // at any zoom), and both bubbles cases now paint the same values, so there is
+  // nothing left for a re-derivation to decide. One owner, one spelling.
+  const paintState = next === 'pins' ? 'hidden' : 'visible';
+  if (!map.getSource('creators')) return; // no layers yet: ensureClusterLayers re-runs this the moment it makes them
+  if (paintState === aggPaintApplied) return;
+  aggPaintApplied = paintState;
+  // SETTLE-CROSSFADE, and these two flat numbers are the whole of it. A
+  // zoom-interpolated opacity band was implemented here first
+  // (['interpolate', ['linear'], ['zoom'], AGG_IN, 1, 6.3, 0], spec §2's
+  // in-gesture crossfade) and REPLACED. Do not reintroduce it; two findings
+  // killed it (Task 3 re-review):
+  //   1. AT REST it was numerically INERT. Anchored at AGG_IN it evaluates to
+  //      its LOW stop (1 / 0.25) at every zoom the mode still calls 'bubbles'
+  //      (<= 6.14), and above AGG_IN the mode is 'pins', where this function
+  //      paints a flat 0 regardless. So wherever the band actually applied it
+  //      EQUALLED the flat values — identical resting pixels, more machinery.
+  //   2. MID-GESTURE it was actively harmful. Between 6.15 and 6.3 it faded the
+  //      bubbles out while the DOM pins are still hidden (they only appear on
+  //      zoomend), so a continuous gesture that DWELLS in that window shows an
+  //      EMPTY map. Desktop wheel-zoom is the worst case: a slow spin holds it
+  //      the whole way. A blank supply window is the one thing the seam exists
+  //      to prevent.
+  // The crossfade instead happens AT SETTLE: setPaintProperty eases through
+  // maplibre's default paint transition (~300ms) against the DOM pins' 220ms
+  // .gs-supply CSS fade — symmetric in both directions, and at no instant is
+  // neither side drawn.
+  // 0.25: the bubbles wear the EVENT-pill treatment (founder call 2026-07-29)
+  // — translucent accent fill behind a solid accent border, so the map reads
+  // through them and the family resemblance with the cyan event pills is
+  // explicit. Twinned with the birth paint on the 'clusters' layer below.
+  const fill = paintState === 'hidden' ? 0 : 0.25;
+  const rest = paintState === 'hidden' ? 0 : 1;
+  map.setPaintProperty('clusters', 'circle-opacity', fill);
+  map.setPaintProperty('clusters', 'circle-stroke-opacity', rest);
+  map.setPaintProperty('cluster-count', 'text-opacity', rest);
+  // The dots share the family fill (translucent) and a full-strength border —
+  // same split as the clusters above and the event pills.
+  map.setPaintProperty('points', 'circle-opacity', fill);
+  map.setPaintProperty('points', 'circle-stroke-opacity', rest);
+  // THE BADGES JOIN THE PAIR (spec §3.3, demand-union §2.3): eleven properties
+  // now, not five. A badge
+  // is drawn on a bubble, so it must leave with it — and it must leave through
+  // the SAME paint transition, or the digit outlives the circle it annotates for
+  // ~300ms and floats over the DOM pins. Both halves (glyph and digit) move
+  // together for the same reason cluster-count's text does, and the amber gigs
+  // badge is a badge like the other two.
+  //
+  // 'event-points' is DELIBERATELY not here: past the DOM limit it is the only
+  // visible form an event has, at EVERY zoom, so the mode must not erase it.
+  // Its latch is setEventGl, below.
+  map.setPaintProperty('cluster-events', 'icon-opacity', rest);
+  map.setPaintProperty('cluster-events', 'text-opacity', rest);
+  map.setPaintProperty('cluster-people', 'icon-opacity', rest);
+  map.setPaintProperty('cluster-people', 'text-opacity', rest);
+  map.setPaintProperty('cluster-gigs', 'icon-opacity', rest);
+  map.setPaintProperty('cluster-gigs', 'text-opacity', rest);
+}
+map.on('zoomend', applyAggMode);
+
+// FOLDING (spec §3.4): below the seam an event is represented exactly ONCE. A
+// pill whose event is INSIDE a cluster hides, because that cluster's own cyan
+// badge already draws it; it comes back when the cluster does not.
+//
+// Display only. eventPoints, drawnEventKeys, tallyLegend and the rail are all
+// host-side and read the same arrays as before, so a folded event is still
+// "drawn" (it IS counted on the map) and its linked gig still folds into
+// gigCount. Nothing here touches a marker, a coordinate, or an open popup: a
+// card opened from a pill survives its pill folding, the same promise the seam
+// already makes for supply pins (spec §3.7).
+//
+// foldedKeys is the settled fold SET, not bookkeeping: dockPass (Task 6) reads
+// it to skip a folded pill, which is why the two passes run in that order
+// everywhere. Do not "clean it up" as write-only before that lands.
+let foldedKeys = new Set();
+// The demand twin (spec 2026-09-05-map-demand-union §2.4), declared beside its
+// sibling because it is the same fact one kind over: a gig inside a cluster is
+// already drawn by that cluster's amber digit, so its DOM badge hides.
+//
+// THE UNGATED SEAM, stated here rather than left to be discovered: a demand
+// badge's m._gsKey is the gig's id (setDemandPoints stamps pt.id), and that is
+// the SAME identifier refreshClusterSource projects as the feature's id and
+// gigkeys accumulates. Two different languages - the expression accumulator and
+// this DOM read - one identifier, and nothing asserts they are the same one.
+// Stamp _gsKey from anything but pt.id, or project a different id into the
+// feature, and every fold silently stops happening: a green build, a green
+// suite, and every clustered gig drawn twice. (AGENTS.md carries it in the map
+// declutter twins bullet, the evkeys <-> _gsKey entry one kind over.)
+let foldedGigKeys = new Set();
+function refold() {
+  // PINS MODE UNFOLDS EVERYTHING, and never reads the source. The clusters
+  // still EXIST above the seam (only their paint is 0), so querying them here
+  // would hide the very pills that are the only thing drawn. BOTH kinds unfold
+  // here, and BOTH sets are EMPTIED rather than merely left unread: the sets are
+  // the shell's stated answer to "what is folded right now", so a stale one is a
+  // lie waiting for the next reader, exactly as it would be for the event half.
+  if (aggMode !== 'bubbles') {
+    for (const m of eventMarkers) m.getElement().classList.toggle('gs-folded', false);
+    for (const m of demandMarkers) m.getElement().classList.toggle('gs-folded', false);
+    foldedKeys = new Set();
+    foldedGigKeys = new Set();
+    return;
+  }
+  // The ['has','point_count'] guard is not decoration: without it the >=
+  // expression is evaluated against every SINGLETON too (which carries no
+  // 'events' property at all) and MapLibre warns once per feature.
+  //
+  // ONE QUERY FOR BOTH KINDS, and the ['any'] arm is what buys that: a cluster
+  // qualifies if it carries events OR gigs. The obvious alternative - two
+  // querySourceFeatures sweeps, one per kind - costs a second full sweep on
+  // EVERY settle, and there are four settle signals (zoomend, moveend, the
+  // gated sourcedata arm, idle). One sweep, two accumulators read off the same
+  // features.
+  const feats = map.getSource('creators')
+    ? map.querySourceFeatures('creators', { filter: ['all', ['has', 'point_count'], ['any', ['>=', ['get', 'events'], 1], ['>=', ['get', 'gigs'], 1]]] })
+    : [];
+  const nextEv = new Set();
+  const nextGig = new Set();
+  // evkeys is the |-joined accumulator (spec §3.1) and gigkeys is its exact
+  // twin - same append of 'key|' per member, so every split leaves an empty
+  // last field, and the SAME key can arrive in two clusters across a tile
+  // boundary. The Set collapses the duplicate and the if (k) drops the empty,
+  // for both. A cluster served by the widened filter may carry only ONE of the
+  // two properties (an events-only cluster has no gigkeys at all), so the
+  // missing-property read is the ordinary case here, not an edge.
+  for (const f of feats) {
+    for (const k of String(f.properties.evkeys || '').split('|')) if (k) nextEv.add(k);
+    for (const k of String(f.properties.gigkeys || '').split('|')) if (k) nextGig.add(k);
+  }
+  foldedKeys = nextEv;
+  foldedGigKeys = nextGig;
+  // Each kind by its OWN accumulator, never crossed: folding a pill by gigkeys
+  // would hide a satellite that nothing on the map is counting.
+  for (const m of eventMarkers) m.getElement().classList.toggle('gs-folded', nextEv.has(m._gsKey));
+  for (const m of demandMarkers) m.getElement().classList.toggle('gs-folded', nextGig.has(m._gsKey));
+}
+// THE DOCK PASS (spec §4.1), the HOST half of the pure layout in
+// src/lib/map-dock-js.ts. A satellite - an event pill, a demand badge - that
+// sits on top of a creator glyph is nudged into a slot AROUND that glyph, so
+// both stay readable and the pair reads as belonging together.
+//
+// WHY THIS IS NOT THE BALTIC (spec §4.2, and the scar the demand block below
+// still carries verbatim). That failure was a CONSTANT pixel offset applied
+// with no reference to what the map showed, at a zoom where a pixel was a
+// country wide. Every clause here is the opposite of that:
+//   - an offset is non-zero ONLY when a same-ground anchor is under the
+//     satellite (dockLayout's gate, fed DOCK_GROUND_M from here);
+//   - it is measured from THAT anchor's projected position at the CURRENT
+//     zoom, so it is visually attributable at every zoom - the badge on
+//     Berlin's dot is Berlin's badge, attached;
+//   - the COORDINATE never moves. There is no setLngLat in this pass. A drag
+//     still tracks the true coordinate and pin-move-truth's live-position
+//     comparison is untouched; the ground scatter is what makes these offsets
+//     go to zero at city zoom.
+// The stated cost: a cross-city pair (a Leverkusen event over Cologne's pins at
+// z6.15) is NOT docked and may overlap until zooming separates it. Docking it
+// would assert, in the only language a map has, that the event is in Cologne.
+//
+// SETTLE ONLY. Registered on zoomend/moveend and called from every setter,
+// never per frame: a docked satellite and its anchor share (near-)identical
+// coordinates, so their RELATIVE screen offset barely moves during a gesture,
+// and a per-frame setOffset rounds to whole pixels and stutters.
+function dockPass() {
+  // The revert lever (spec §8.2). Off: satellites stay centre-anchored on their
+  // own coordinates and setDemandPoints' legacy DEMAND_DODGE_ZOOM nudge runs
+  // again instead - which is what makes this a revert rather than a hope.
+  if (!DOCK_SATELLITES) return;
+  // Nothing to place, and nothing to UN-place either: a removed marker took its
+  // latch with it. Bailing here is what keeps a satellite-less map from paying
+  // for two querySourceFeatures sweeps on every single settle.
+  if (!eventMarkers.length && !demandMarkers.length) return;
+  const bubbles = aggMode === 'bubbles';
+  const satellites = [];
+  const owners = new Map();
+  for (let i = 0; i < eventMarkers.length; i++) {
+    addSatellite(satellites, owners, eventMarkers[i], 'event', eventMarkers[i]._gsKey || ('ev#' + i));
+  }
+  for (let i = 0; i < demandMarkers.length; i++) {
+    // PREFIXED, so the two marker sets' id spaces cannot collide: the results
+    // are keyed by satellite id, and a gig id that happened to equal a place
+    // key would hand one satellite the other's offset with nothing to notice it.
+    addSatellite(satellites, owners, demandMarkers[i], 'gig', 'gig:' + (demandMarkers[i]._gsKey || i));
+  }
+  const rows = dockLayout({
+    mode: bubbles ? 'bubbles' : 'pins',
+    groundM: DOCK_GROUND_M,
+    gapPx: DOCK_GAP_PX,
+    overlapPx: DOCK_OVERLAP_BUBBLES_PX,
+    anchors: bubbles ? glAnchors() : pinAnchors(),
+    satellites: satellites,
+  });
+  // Keyed by ID, never by index: dockLayout returns rows in its OWN order (every
+  // demand badge first, then event pills by hash) and OMITS every folded
+  // satellite. So an id it never returned is a satellite that must sit on its
+  // coordinate - [0, 0], written through the same latch, which is what clears
+  // the stale offset off a pill that WAS docked and has just folded.
+  const vecs = new Map();
+  for (const r of rows) vecs.set(r.id, [Math.round(r.dx), Math.round(r.dy)]);
+  for (const s of satellites) {
+    const v = vecs.get(s.id) || [0, 0];
+    applyDock(owners.get(s.id), v[0], v[1]);
+  }
+}
+
+// A satellite's box IS measured (offsetWidth/offsetHeight), unlike an anchor
+// pin's: a pill's width is its own text ('🎪' vs '🎪 12') and NOTHING
+// transitions it, where the supply pin's 180ms size change makes the same read
+// wrong for exactly as long as it matters.
+function addSatellite(list, owners, m, kind, id) {
+  const el = m.getElement();
+  const ll = m.getLngLat();
+  const at = map.project([ll.lng, ll.lat]);
+  list.push({
+    id: id,
+    kind: kind,
+    x: at.x,
+    y: at.y,
+    w: el.offsetWidth,
+    h: el.offsetHeight,
+    lat: ll.lat,
+    lng: ll.lng,
+    // refold() has already run at every call site, so this is the SETTLED fold
+    // state: an invisible pill must never consume the one slot an identity dot
+    // has (spec §4.1 step 1).
+    folded: el.classList.contains('gs-folded'),
+  });
+  owners.set(id, m);
+}
+
+// PINS-MODE anchors: the DOM creator pins. The radius comes from the pin
+// DIAMETER constants styleMarker paints with (map-dock-js.ts's PIN_D /
+// PIN_D_PRO / PIN_D_ACTIVE, interpolated here exactly as they are there), never
+// from offsetWidth - the .gs-supply size transition is 180ms, so a pin read
+// mid-flip reports a box it does not have yet and the pill docks INTO it.
+function pinAnchors() {
+  const out = [];
+  for (let i = 0; i < markers.length; i++) {
+    const m = markers[i];
+    const p = m._gigshotPoint;
+    if (!p) continue;
+    const ll = m.getLngLat();
+    const at = map.project([ll.lng, ll.lat]);
+    const pop = m.getPopup();
+    const popupOpen = !!(pop && pop.isOpen && pop.isOpen());
+    const base = p.pro ? 38 : 34;
+    out.push({
+      id: 'pin:' + (p.id != null ? p.id : i),
+      x: at.x,
+      y: at.y,
+      r: (base + (popupOpen ? 6 : 0)) / 2,
+      lat: ll.lat,
+      lng: ll.lng,
+      badgeSlots: [],
+      accepts: 'all',
+    });
+  }
+  return out;
+}
+
+// BUBBLES-MODE anchors: the two GL dot families (spec §2), read straight off
+// the tiles. BUBBLES ARE NEVER ANCHORS - a satellite docked to a cluster would
+// claim membership of a group it is not in.
+//
+// The identity-dot filter is the 'points' layer's own predicate - a TWIN, and
+// both copies move together - and every term is load-bearing:
+// querySourceFeatures is not filtered by any LAYER, an unclustered EVENT feature
+// is GL-invisible below the DOM limit, and an unclustered GIG has no GL form at
+// ALL (E5 cut the gig layer), so without those two terms a satellite could dock
+// against nothing a viewer can see. The gig case is the sharper one: the badge
+// standing ON that coordinate IS the gig's only form, so admitting the feature
+// makes the badge dock to ITSELF (breaker C2).
+function glAnchors() {
+  if (!map.getSource('creators')) return [];
+  const out = [];
+  const seen = new Set();
+  // slotsOf is a FUNCTION of the feature, not a constant, because a mixed dot's
+  // badges are per-feature facts: which shoulders it actually wears depends on
+  // its own counts (see the second take below).
+  const take = (feats, r, slotsOf, badgeStandoff, accepts) => {
+    for (const f of feats) {
+      const key = featureKey(f);
+      if (seen.has(key)) continue; // tiles overlap: the same dot arrives twice
+      seen.add(key);
+      const c = (f.geometry && f.geometry.coordinates) || [];
+      const at = map.project([c[0], c[1]]);
+      out.push({
+        id: key, x: at.x, y: at.y, r: r,
+        lat: c[1], lng: c[0], badgeSlots: slotsOf(f), badgeStandoff: badgeStandoff, accepts: accepts,
+      });
+    }
+  };
+  take(map.querySourceFeatures('creators', {
+    filter: [
+      'all',
+      ['!', ['has', 'point_count']],
+      ['!=', ['get', 'kind'], 'event'],
+      ['!=', ['get', 'kind'], 'gig'],
+    ],
+  }), DOT_R_PX, () => [], undefined, 'all');
+  // The MIXED dot (LED = 'dot'): below the dignity floor on BOTH counts, so it
+  // wears a neutral face and its own count badges - the anchor's OWN furniture,
+  // which is why a slot one covers is not free. It serves DEMAND
+  // badges only: an event pill on it would be a second event glyph for a group
+  // whose events are already counted inside it. Its badges sit at their OWN
+  // standoff (DOT_BADGE_STANDOFF_PX), farther from the rim than a plain
+  // bubble's badge would be - see that const's own comment in map-dock-js.ts
+  // for the arithmetic, rather than repeating it here.
+  //
+  // THE SLOTS ARE DERIVED FROM THE FEATURE'S OWN COUNTS, never a hard-coded
+  // ['TR'] (demand-union §2.4). Two ways the constant lied: ~30 of the 694
+  // reachable dot cells carry no events at all, so there is no cyan badge at TR
+  // to block anything; and since the demand wave a dot that folds a gig wears
+  // an amber badge at TL, which the constant could not mention. A slot claimed
+  // by furniture that is not drawn pushes a satellite for nothing; a slot NOT
+  // claimed by furniture that IS drawn puts the satellite under the badge.
+  take(map.querySourceFeatures('creators', {
+    filter: ['all', ['has', 'point_count'], ['<', ['get', 'people'], 5], ['<', ['get', 'events'], 5]],
+  }), DOT_R_PX, (f) => {
+    const pr = f.properties || {};
+    return (pr.events >= 1 ? ['TR'] : []).concat(pr.gigs >= 1 ? ['TL'] : []);
+  }, DOT_BADGE_STANDOFF_PX, 'gig');
+  return out;
+}
+
+// Tile boundaries hand the SAME feature back from two tiles, and two anchors at
+// one point would let a second satellite dock to the duplicate in the slot the
+// first already took. cluster_id and the creator's own id are the stable
+// identities; the coordinate is the last resort, and it is what keeps two
+// genuinely different id-less features two.
+function featureKey(f) {
+  const p = f.properties || {};
+  if (p.cluster_id != null) return 'c:' + p.cluster_id;
+  if (p.id != null) return 'p:' + p.id;
+  const c = (f.geometry && f.geometry.coordinates) || [];
+  return 'x:' + c[0] + ',' + c[1];
+}
+
+// THE LATCH (spec §4.1 step 5). Writes only when the ROUNDED pair changed:
+// setOffset lands on whole pixels anyway, and a settle that recomputes the same
+// vector must not re-write a marker's transform - nor, worse, an open card's
+// offset underneath the reader.
+//
+// An ABSENT latch reads as [0, 0] because that IS a fresh marker's real state:
+// it is constructed anchor 'center' with no setOffset at all, and its popup
+// with the bare 'offset: 18' that popupOffsetFor(18, 0, 0) matches on all nine
+// anchors up to the library's own rounding of the diagonals (12.728 vs 13 -
+// normalizeOffset applies Math.round to the corner components, this does not;
+// sub-pixel, and never actually written because applyDock early-returns on
+// [0, 0]).
+// So the first pass writes only what actually has to move.
+function applyDock(m, dx, dy) {
+  const last = m._gsDock || [0, 0];
+  if (last[0] === dx && last[1] === dy) return;
+  m._gsDock = [dx, dy];
+  m.setOffset([dx, dy]);
+  const pop = m.getPopup();
+  // 18 is the 'offset: 18' every satellite popup is constructed with (the pill
+  // in setEventPoints, the badge in setDemandPoints) - change one and you must
+  // change the other, or the card's tail lands on the pill it just avoided.
+  if (pop) pop.setOffset(popupOffsetFor(18, dx, dy));
+}
+
+// MapLibre's Popup.normalizeOffset(n) turns a scalar into a PER-ANCHOR object:
+// each anchor gets the point n px away along its own axis or diagonal, so a card
+// tailing a marker from the left is pushed right by n and a corner anchor by
+// n/sqrt(2) on each axis. That helper is private to the library and this shell
+// cannot import it, so the nine entries are spelled out - and the dock vector is
+// ADDED to every one of them, which is what keeps the card's standoff measured
+// from where the satellite NOW IS rather than from the coordinate it left.
+function popupOffsetFor(base, dx, dy) {
+  const d = base / Math.SQRT2;
+  return {
+    center: [dx, dy],
+    top: [dx, dy + base],
+    'top-left': [dx + d, dy + d],
+    'top-right': [dx - d, dy + d],
+    bottom: [dx, dy - base],
+    'bottom-left': [dx + d, dy - d],
+    'bottom-right': [dx - d, dy - d],
+    left: [dx + base, dy],
+    right: [dx - base, dy],
+  };
+}
+// SETTLE ONLY, never 'zoom': a fold class that flips at every integer-zoom
+// crossing strobes through a pinch. Mid-gesture the GL badges may re-form while
+// the pills hold their last settled state - a transient bounded by the gesture,
+// the same discipline the seam keeps.
+//
+// The registration ORDER is the setters' order (spec §3.1): handler order IS
+// dispatch order, so a settle that flips the mode ends with a dock that ran
+// after the fold that ran after the flip.
+map.on('zoomend', refold);
+map.on('zoomend', dockPass);
+// applyAggMode joins the moveend triple too (spec §3.1: applyAggMode, then
+// refold, then dockPass, on BOTH settle events). Behaviourally it is a
+// no-op today - aggModeFor is a function of zoom and two counts, none of
+// which a pan changes, and MapLibre fires zoomend before moveend for any
+// zoom-changing move - but the ordered triple is the contract, and a future
+// term that a pan CAN change (a viewport-scoped count) would otherwise be
+// read by the fold and the dock before the mode that governs them.
+map.on('moveend', applyAggMode);
+map.on('moveend', refold);
+map.on('moveend', dockPass);
+map.on('sourcedata', (e) => {
+  // A bare data event fires while tiles are still 'reloading', where
+  // querySourceFeatures would read the PREVIOUS union's clusters.
+  // isSourceLoaded goes true exactly when the last reloading tile lands - but
+  // it ALSO goes true when the last tile of an ordinary pan lands, hence the
+  // isMoving guard, with moveend catching up at settle.
+  //
+  // map.isMoving() is the PUBLIC accessor, which is _moving || handlers.isMoving(),
+  // and that handler half includes scroll-zoom's ~200ms finish tail - which is
+  // what guarantees a sourcedata dropped here is always followed by a moveend.
+  // Never "simplify" it to the private flag.
+  if (e.sourceId !== 'creators' || !e.isSourceLoaded || map.isMoving()) return;
+  refold();
+  dockPass();
+});
+// THE CORRECTOR OF LAST RESORT, never the primary (Task 7's live-shell reading).
+// MEASURED: a settle whose cluster tiles land after moveend folds 5 pills against
+// 6 OLD clusters, and the gated sourcedata arm above ran with isSourceLoaded true
+// and STILL read 3 where the settled answer was 0 - so those events were drawn by
+// nothing until the next settle. 'idle' fires once after every render burst with
+// no transition pending and every tile in view loaded, so BY CONSTRUCTION it runs
+// after the last tile lands. It is the last resort and not the primary because it
+// fires LATE on a slow link: the settle passes above are the fast path, and the
+// sourcedata arm still corrects one tile-load earlier whenever it can. Both
+// passes are latched/idempotent (the fold toggles classes to the same values; the
+// dock writes nothing when the rounded offset is unchanged), so an extra run here
+// costs one querySourceFeatures.
+map.on('idle', () => {
+  refold();
+  dockPass();
+});
+
+// THE event-points LATCH (spec §3.6), the seam's counterpart for the one layer
+// the seam does not own. Born false, matching a layer born at opacity 0: the
+// gate that reveals it is not tripped at birth. setEventPoints (Task 5) calls
+// this from the SAME count that decides whether DOM pills are built, so pills
+// and dots never coexist.
+//
+// Latched for the reason applyAggMode is: a setter that re-paints on every push
+// writes two identical paint properties per event refresh. The layer is created
+// by ensureClusterLayers, which every setEventPoints call reaches through
+// refreshClusterSource BEFORE it would call this — so there is no source guard
+// here; the seam's own guard exists because zoomend can fire before any push.
+let eventGlApplied = false;
+function setEventGl(on) {
+  const want = !!on;
+  if (want === eventGlApplied) return;
+  eventGlApplied = want;
+  const v = want ? 1 : 0;
+  map.setPaintProperty('event-points', 'icon-opacity', v);
+  map.setPaintProperty('event-points', 'text-opacity', v);
+}
+
+function toGeoJSON(pts) {
+  // REALM-SANITIZED properties (silent-failure hunt, 2026-07-29): the points
+  // arrive from the HOST page via contentWindow calls, so ANY object among
+  // them — the flat point itself included, which was the production hazard —
+  // carries the host realm's prototypes. MapLibre's worker serializer checks
+  // constructor IDENTITY against THIS realm's Object before posting to the
+  // worker, so any host-realm object placed anywhere in the setData payload
+  // makes the whole call throw ('cannot serialize object of unregistered
+  // class') and the cluster source silently keeps stale data. Shipped with F3
+  // (setClusterData only ran above 60 pins before it, so the seam never
+  // crossed realms in production). The JSON round-trip rebuilds every value in
+  // the shell realm and drops anything non-data; measured ~1ms per 200-point
+  // pass, and the lastClusterSig short-circuit means it only runs on genuine
+  // data change.
+  return {
+    type: 'FeatureCollection',
+    features: pts.map(p => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
+      properties: JSON.parse(JSON.stringify(p)),
+    })),
+  };
+}
+
+function ensureClusterLayers() {
+  if (map.getSource('creators')) return;
+  // The three GL supply layers below are BORN VISIBLE: their opacity paint is
+  // the same flat pair applyAggMode's 'visible' arm sets (0.25 fill, 1
+  // everywhere else), and the latch's initial value says so. The crossfade is a
+  // SETTLE-time setPaintProperty ease, not a per-frame GPU curve — the full WHY,
+  // and why the zoom-interpolated band it replaced was retired, is at
+  // applyAggMode's paint arms. Nothing in here toggles layer VISIBILITY: that is
+  // a binary layout flip, which cannot be eased at all.
+  map.addSource('creators', {
+    type: 'geojson',
+    data: toGeoJSON([]),
+    cluster: true,
+    // clusterMaxZoom is the LAST zoom at which supercluster groups points;
+    // ABOVE it every feature is emitted individually. It was 14, so from z15 up
+    // NEAR-coincident creators were emitted as separate 'points' circles drawn
+    // on top of each other: no count, no badge, nothing hinting that more than
+    // one person is there, and only ONE of them reachable (the 'points' click
+    // handler below takes e.features[0], an arbitrary winner). Landing next to
+    // a rival made them effectively invisible and unclickable.
+    //
+    // Note what this does NOT cover, so nobody re-derives a false premise:
+    // EXACTLY-coincident points never reach this source at all — useMapFrame
+    // runs scatterColliding on every push, on both the DOM and the cluster path.
+    // The residue this ceiling addresses is points that are CLOSE but distinct
+    // (legacy rows, and the cross-table home-vs-window case 0139's server-side
+    // separation deliberately does not cover) — those the client scatter leaves
+    // alone, and they are precisely what overlapped from z15 up.
+    //
+    // Raising it to 17 keeps such a pair a COUNTED cluster bubble to street
+    // zoom: the viewer sees "2", and the click routes through
+    // getClusterExpansionZoom instead of silently picking a winner. Points
+    // genuinely far apart are unaffected — clusterRadius is 50 SCREEN pixels,
+    // so 0139's ~120m minimum separation un-clusters by ~z16 on its own.
+    //
+    // TWINNED with the cluster-tap fallback's ceiling below, and single-sourced
+    // from CLUSTER_MAX_ZOOM in src/lib/mapHtml.ts so both move together — see
+    // that const for the arithmetic that makes them twins.
+    clusterMaxZoom: 17,
+    clusterRadius: 50,
+    // DIGNITY FLOOR (spec 2026-07-28 section 2.2): supercluster's default
+    // minPoints=2 is tuned for thousands of points; at our N a "2" bubble
+    // replaces two real, differentiated, tappable pins with a content-free
+    // digit. 5 matches DIGNITY_THRESHOLD (src/hooks/useMapData.ts): one
+    // principle, three enforcement points now (this option, the LED family
+    // predicate below, and that hook). Interpolated from the DIGNITY const in
+    // src/lib/mapHtml.ts, which is why the number is not typed here.
+    // The KEY IS clusterMinPoints, not minPoints: this maplibre SOURCE option
+    // wraps supercluster's own minPoints (the worker reads clusterMinPoints and
+    // passes Math.max(2, it) down), and the two layers of the stack spell it
+    // differently. Spelled the inner way it is an unknown property, which the
+    // style-spec validator REJECTS and addSource then bails on, so the source
+    // never exists at all.
+    clusterMinPoints: 5,
+    // THE UNION'S AGGREGATES (spec §3.1). The source carries creators AND
+    // events now, so a cluster has to be able to say how many of each it holds:
+    // point_count alone cannot tell a room full of people from a week full of
+    // parties. Spelled ONCE in src/lib/mapHtml.ts (CLUSTER_PROPERTIES) and
+    // interpolated, so the family tests execute these exact expressions through
+    // the real supercluster rather than a hand-copied paraphrase.
+    clusterProperties: {"people":["+",["case",["any",["==",["get","kind"],"event"],["==",["get","kind"],"gig"]],0,1]],"events":["+",["case",["==",["get","kind"],"event"],1,0]],"approx":["+",["case",["all",["==",["get","kind"],"event"],["==",["get","precise"],false]],1,0]],"evkeys":[["concat",["accumulated"],["get","evkeys"]],["case",["==",["get","kind"],"event"],["concat",["get","placeKey"],"|"],""]],"gigs":["+",["case",["==",["get","kind"],"gig"],1,0]],"gigkeys":[["concat",["accumulated"],["get","gigkeys"]],["case",["==",["get","kind"],"gig"],["concat",["get","id"],"|"],""]]},
+  });
+  map.addLayer({
+    id: 'clusters', type: 'circle', source: 'creators',
+    filter: ['has', 'point_count'],
+    paint: {
+      // FAMILY COLOUR (spec §3.2): an EVENT-LED cluster is cyan, everything else
+      // stays the neutral accent purple.
+      //
+      // ACCENT-CONTRACT MIRROR. docs/ACCENT-CONTRACT.md section 3 freezes
+      // CLUSTER circles neutral purple because a cluster "mixes owners" and
+      // belongs to none of them. That still holds, and this is not a breach of
+      // it: an event-led cluster is coloured by its LAYER, not by any owner.
+      // It is the same reading that moved the GL 'points' layer to SUBJECT in
+      // section 2's 2026-07-02 amendment (see that layer's own WHY below); the
+      // design reviewer confirmed it, and the contract's row is amended in this
+      // wave. Do not "fix" this back to a flat C.accent citing section 3.
+      //
+      // THE MIXED DOT'S COLOUR (demand-union spec §2.2). A dot holding PEOPLE is
+      // the neutral accent as before; a dot holding NONE takes its LARGEST FOLDED
+      // KIND, because a cluster can now be five open gigs and nothing else and
+      // painting that as a lone creator dot is a lie about who is standing there.
+      // A zero-people TIE - as many gigs as events - goes AMBER by the '>=':
+      // demand is the call to action, so the tie goes to it. Stated here so
+      // nobody reads it as an accident of operator choice.
+      //
+      // ACCENT-CONTRACT §3 again: like the cyan arm above, the amber is a LAYER
+      // colour and not an owner's, and it can only ever land on a dot with zero
+      // people - a glyph that stands for no person at all.
+      'circle-color': ['case',
+        ['==', ["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"], 'event'], C.cyan,
+        ['==', ["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"], 'dot'], ['case',
+          ['>', ['get', 'people'], 0], C.accent,
+          ['>=', ['get', 'gigs'], ['get', 'events']], C.amber,
+          C.cyan,
+        ],
+        C.accent,
+      ],
+      // The EVENT-pill treatment (founder call 2026-07-29): translucent accent
+      // fill behind a solid accent border — the same rgba(accent, ~0.22)-over-
+      // dark family the cyan event pills wear, so bubbles and events read as
+      // siblings and the map shows through both. applyAggMode's 'visible' arm
+      // restores exactly this number (the crossfade twins).
+      'circle-opacity': 0.25,
+      // SIZE AND NUMBER AGREE (spec §3.2): the step reads the same DIGIT the
+      // label prints, never point_count — a mixed cluster sized by a total it
+      // never shows would be a circle whose bigness means nothing on it. A dot
+      // (neither count clears the floor) is the flat 10 the lone identity dots
+      // already use, so an un-headlined group is the same size as one person.
+      'circle-radius': ['case', ['==', ["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"], 'dot'], 10, ['step', ["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"creator"],["get","people"],["get","events"]], 16, 25, 22, 100, 28]],
+      'circle-stroke-width': 2,
+      // Border in the FAMILY colour, not text-white: the border carries the
+      // identity now that the fill is translucent (exactly the event pill's
+      // split), so it takes the same case as the fill above.
+      'circle-stroke-color': ['case',
+        ['==', ["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"], 'event'], C.cyan,
+        ['==', ["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"], 'dot'], ['case',
+          ['>', ['get', 'people'], 0], C.accent,
+          ['>=', ['get', 'gigs'], ['get', 'events']], C.amber,
+          C.cyan,
+        ],
+        C.accent,
+      ],
+      // Stated, not left implicit: applyAggMode drives this property to 0 with
+      // the fill, and a property it never sets a starting value for would
+      // outlive the fill and leave hollow rings ghosting over the pins.
+      'circle-stroke-opacity': 1,
+    },
+  });
+  map.addLayer({
+    id: 'cluster-count', type: 'symbol', source: 'creators',
+    filter: ['has', 'point_count'],
+    // THE HEADLINE DIGIT (spec §3.2). A 'dot' cluster prints NOTHING: neither of
+    // its counts clears the dignity floor, so a number there would headline
+    // scarcity. The other two families print their OWN count, never point_count.
+    //
+    // point_count_abbreviated is RETIRED: it existed to render "1.2k", and
+    // 'people' cannot reach four digits here (the client's max_points caps the
+    // supply read at 500), so the abbreviation only ever cost us a number we
+    // could not compose with. to-string, rather than a bare number, because a
+    // raw number in a 'formatted' slot is not exercisable offline: the style
+    // spec accepts it, but nothing in a node test can tell us what it renders.
+    layout: {
+      'text-field': ['case', ['==', ["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"], 'dot'], '', ['to-string', ["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"creator"],["get","people"],["get","events"]]]],
+      'text-size': 13,
+      'text-font': ['Noto Sans Bold'],
+    },
+    paint: {
+      'text-color': '#ffffff',
+      // Same paint state as the circle it sits on, so the digit and its bubble
+      // leave together (fadeDuration:0 on the map puts them on one clock).
+      'text-opacity': 1,
+      // TRANSLUCENT dark halo, not opaque: at 1.0 the ring reads as a sticker
+      // outline around the number. At 0.6 it only buys edge contrast, which the
+      // label needs against BOTH the purple fill and, mid-crossfade as that fill
+      // drops toward 0, whatever basemap is underneath (spec section 2.3).
+      'text-halo-color': rgbaOf(C.bg, 0.6),
+      'text-halo-width': 1.5,
+    },
+  });
+  // Below the seam this layer is not empty: a cluster needs minPoints (5) to
+  // form, so sub-dignity singletons paint here as their own identity dots WHILE
+  // the bubbles are still up. That honest mixed state is the scatter-over-aggregate
+  // decision working (spec section 2.2), not a bug to hide. It carries the SAME
+  // paint state as the bubbles because it is on the same side of the seam: this
+  // whole GL set hands over to the DOM markers above it, so the singletons must
+  // leave with their bubbles or they linger as duplicate dots under the pins.
+  map.addLayer({
+    id: 'points', type: 'circle', source: 'creators',
+    // UNCLUSTERED CREATORS ONLY (spec §3.2). The source carries events and open
+    // gigs now, and neither must paint here: an event's visible form is the DOM
+    // pill (folded or docked) and a gig's is the amber DOM badge, so a purple
+    // identity dot under either would say "a person is here" about a party or a
+    // request. Past the DOM limit the separate event-points layer paints the
+    // event instead (§3.6); a gig has no GL form at all (E5). The TWIN of this
+    // predicate is glAnchors' identity-dot query - change one, change the other.
+    filter: [
+      'all',
+      ['!', ['has', 'point_count']],
+      ['!=', ['get', 'kind'], 'event'],
+      ['!=', ['get', 'kind'], 'gig'],
+    ],
+    paint: {
+      // SOLID identity fill, not a hollow ring (FOUNDER CALL 2026-07-29, after
+      // living with the shipped F3 seam). This used to be C.card — a DARK card
+      // fill inside a 2px identity stroke — which at continent zoom read as an
+      // EMPTY ring: a hole punched in the map rather than a person standing on
+      // it. At 23 creators these dots ARE most of the zoomed-out map, so "empty"
+      // was the whole first impression. Filled with the identity accent they say
+      // "creators here" and carry the SAME identity the DOM pin takes on when you
+      // zoom past the seam — one person, one colour, both sides of the handover.
+      //
+      // Data-driven identity (subject partition): DJ points fill ACID
+      // (C.acid = mapDjAccent.text), everything else the purple accent — the
+      // same split identColor() applies on the DOM-marker path. coalesce guards a
+      // point with NO vertical at all (e.g. the dev dump script): match-on-null
+      // is an evaluation error that paints black, not the fallback. Keep it.
+      //
+      // NOT an ACCENT-CONTRACT violation, so nobody "fixes" this back citing it:
+      // docs/ACCENT-CONTRACT.md section 3 freezes CLUSTER circles neutral purple
+      // because a cluster MIXES owners and belongs to none of them. This layer is
+      // the UNCLUSTERED one — every circle here is exactly one creator, and
+      // section 2's 2026-07-02 amendment lists the GL 'points' layer as a SUBJECT
+      // surface: an individual identity IS accent-carrying (the DOM pins already
+      // are). CORRECTED 2026-09-05 (this said "The 'clusters' layer above still
+      // paints flat C.accent; untouched" — false since this wave made 'clusters'
+      // paint BY FAMILY): the cluster circle is now event-cyan for an event-led
+      // cluster and neutral purple otherwise, which is section 3's rule applied
+      // to a MIXED owner set rather than a departure from it — cyan is the event
+      // KIND's colour, not a creator's accent, so a cyan bubble still belongs to
+      // no owner.
+      // Shell-runtime calls (e.g. rgbaOf) in a match ARM are safe — computed
+      // once at addLayer time, stored by MapLibre as plain values. In the match
+      // INPUT they would also run exactly once and silently FREEZE a
+      // per-feature decision into a constant — the general trap, kept here
+      // beside the surviving match expressions after the glow arms (which used
+      // rgbaOf) were superseded.
+      'circle-color': ['match', ['coalesce', ['get', 'vertical'], ''], 'dj', C.acid, C.accent],
+      // 9 -> 10: slightly more present at continent zoom. Deliberately NOT
+      // bigger — dignity is presence, not shouting, and a fatter dot at N=23
+      // starts merging neighbours back into the blobs the seam exists to avoid.
+      'circle-radius': 10,
+      // The EVENT-PILL FAMILY (founder call 2026-07-29, second half): the lone
+      // dots wear the same translucent-fill + solid-border split as the cluster
+      // bubbles and the cyan event pills — in the dot's OWN identity hue, so a
+      // DJ dot is acid family and everyone else accent family. This supersedes
+      // c18607a's opaque-fill + soft-glow look; the earlier "hollow rings read
+      // as empty" concern does not return because the border is SOLID identity
+      // (not a faint ring over a void) and the whole marker family now shares
+      // the treatment — coherence is what makes translucency read as a style,
+      // not a fade. applyAggMode's visible arm restores this fill (the
+      // crossfade twins).
+      'circle-opacity': 0.25,
+      'circle-stroke-width': 2,
+      // Solid identity border — the same match as the fill, full strength: the
+      // border carries the identity now that the fill is translucent (the
+      // event pill's split exactly). coalesce guards match-on-null (see the
+      // fill's WHY above); no rgbaOf needed since the border is opaque.
+      'circle-stroke-color': ['match', ['coalesce', ['get', 'vertical'], ''], 'dj', C.acid, C.accent],
+      'circle-stroke-opacity': 1,
+    },
+  });
+  // THE BADGES (spec §3.3, demand-union §2.3). APPENDED — no beforeId — so they
+  // sit ABOVE the three
+  // layers created here: the translucent pass draws in layer order, and
+  // maplibre's top-down hit ordering is what makes "the badge wins a tap" free
+  // (see onClusterTap below). THREE layers now: two for the minority kinds a
+  // family can headline (events, people), each with ONE
+  // predicate — every family shows the count it does not headline, so a folded
+  // event is represented exactly once at rest and no family ever headlines a
+  // number below the dignity floor — plus the amber gigs badge, which needs no
+  // family term at all because NO family headlines a gig count.
+  //
+  // They are BORN VISIBLE like the three above, and applyAggMode drives their
+  // icon/text opacity with the rest — a badge is drawn on a bubble and must
+  // leave with it. The images they name are created by makeBadgeImages on
+  // 'load', BEFORE the first push reaches here; a symbol layer whose icon-image
+  // names a missing image simply draws no icon.
+  map.addLayer({
+    id: 'cluster-events', type: 'symbol', source: 'creators',
+    // Creator-led bubbles AND mixed dots. A mixed dot carries this badge only
+    // when it actually folded an event.
+    // CORRECTED 2026-09-06 (demand-union). This clause used to read "A mixed dot
+    // ALWAYS carries this badge: it has events >= 1 by construction (neither
+    // count clears the floor, but their sum does)" — true while the union held
+    // two kinds (people < 5, events < 5, people + events >= 5 forces both >= 1),
+    // and FALSE the moment gigs joined it: a gig counts toward point_count and
+    // the dignity floor too, so 1 creator + 4 gigs and 0 people + 5 gigs are both
+    // reachable dot cells with events = 0 and no cyan badge at all.
+    // This is not tidiness — it is the exact fact the dock depends on. See
+    // glAnchors()'s per-feature badgeSlots, which DERIVES the slot list from the
+    // feature's own counts for precisely this reason: a hard-coded ['TR'] here
+    // would give a reader permission to claim a slot for furniture that is not
+    // drawn (pushing a satellite for nothing) or miss one that is.
+    // An event-LED cluster is excluded because it headlines its
+    // own event count already — badging it would say the same number twice.
+    filter: ['all', ['has', 'point_count'], ['!=', ["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"], 'event'], ['>=', ['get', 'events'], 1]],
+    layout: {
+      // The dashed disc is the APPROXIMATE treatment surviving the fold: it
+      // shows only when EVERY folded event is approximate (approx === events),
+      // so one surveyed event in the group restores the confident outline.
+      'icon-image': ['case', ['==', ['get', 'approx'], ['get', 'events']], 'gs-badge-cyan-approx', 'gs-badge-cyan'],
+      // to-string for the same reason cluster-count uses it: a raw number in a
+      // 'formatted' slot is not exercisable offline.
+      'text-field': ['to-string', ['get', 'events']],
+      'text-size': 10,
+      'text-font': ['Noto Sans Bold'],
+      // ON the glyph's rim, up-and-right, from ONE TS helper per unit (see
+      // badgeOffsetExpr): icon-offset is SCREEN pixels (y DOWN), text-offset the
+      // same vector in ems.
+      'icon-offset': ["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"dot"],["literal",[11.313708498984761,-11.313708498984761]],["step",["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"creator"],["get","people"],["get","events"]],["literal",[12.727922061357857,-12.727922061357857]],25,["literal",[16.970562748477143,-16.970562748477143]],100,["literal",[21.213203435596427,-21.213203435596427]]]],
+      'text-offset': ["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"dot"],["literal",[1.131370849898476,-1.131370849898476]],["step",["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"creator"],["get","people"],["get","events"]],["literal",[1.2727922061357857,-1.2727922061357857]],25,["literal",[1.6970562748477143,-1.6970562748477143]],100,["literal",[2.121320343559643,-2.121320343559643]]]],
+      // A badge is never hidden by collision and never evicts a basemap label:
+      // a count that disappears at some zooms is worse than no count, and
+      // rewriting the map to make room for our own furniture is not ours to do.
+      'icon-allow-overlap': true,
+      'text-allow-overlap': true,
+      'icon-ignore-placement': true,
+      'text-ignore-placement': true,
+    },
+    paint: {
+      // DARK ink on a SOLID cyan disc: white on C.cyan measures 1.8:1 and is
+      // unreadable, which the event-CTA founder call already settled. Never the
+      // pill's '#e6fbff' — that ink sits on 22%-alpha cyan over the dark
+      // basemap, a completely different background.
+      'text-color': C.cyanInk,
+      'icon-opacity': 1,
+      'text-opacity': 1,
+    },
+  });
+  map.addLayer({
+    id: 'cluster-people', type: 'symbol', source: 'creators',
+    // The mirror predicate: only an EVENT-LED bubble, and only when it actually
+    // holds people. A badge reading 0 would be a footnote about nobody.
+    filter: ['all', ['has', 'point_count'], ['==', ["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"], 'event'], ['>', ['get', 'people'], 0]],
+    layout: {
+      // No approximate variant here: approx is an EVENT-coordinate property, and
+      // this badge counts people.
+      'icon-image': 'gs-badge-accent',
+      'text-field': ['to-string', ['get', 'people']],
+      'text-size': 10,
+      'text-font': ['Noto Sans Bold'],
+      'icon-offset': ["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"dot"],["literal",[11.313708498984761,-11.313708498984761]],["step",["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"creator"],["get","people"],["get","events"]],["literal",[12.727922061357857,-12.727922061357857]],25,["literal",[16.970562748477143,-16.970562748477143]],100,["literal",[21.213203435596427,-21.213203435596427]]]],
+      'text-offset': ["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"dot"],["literal",[1.131370849898476,-1.131370849898476]],["step",["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"creator"],["get","people"],["get","events"]],["literal",[1.2727922061357857,-1.2727922061357857]],25,["literal",[1.6970562748477143,-1.6970562748477143]],100,["literal",[2.121320343559643,-2.121320343559643]]]],
+      'icon-allow-overlap': true,
+      'text-allow-overlap': true,
+      'icon-ignore-placement': true,
+      'text-ignore-placement': true,
+    },
+    paint: {
+      // WHITE on C.accentDeep (5.70:1). Never on C.accent, where it is 3.96:1 —
+      // the exact ratio tests/theme-contrast.test.ts records as the documented
+      // AA failure, and a 10px bold digit is not large text. That is why the
+      // disc has its own token rather than borrowing the bubble's.
+      'text-color': '#ffffff',
+      'icon-opacity': 1,
+      'text-opacity': 1,
+    },
+  });
+  map.addLayer({
+    id: 'cluster-gigs', type: 'symbol', source: 'creators',
+    // NO led-family term, unlike the two badges above — and that asymmetry is
+    // the point (demand-union §2.3). There is no demand-LED family: a spot with
+    // five gigs and few creators is a neutral dot wearing an amber "5". So no
+    // cluster ever HEADLINES a gig count, which means every family can carry
+    // this badge without ever saying the same number twice. A creator-led
+    // bubble, an event-led bubble and a mixed dot all qualify.
+    //
+    // The count is STANDALONE gigs only — the gigs already folded inside a
+    // cyan event count are not counted again here (the parent's badge grammar:
+    // a badge counts folded objects of its own kind, and expanding yields
+    // exactly that many).
+    filter: ['all', ['has', 'point_count'], ['>=', ['get', 'gigs'], 1]],
+    layout: {
+      // A rounded SQUARE (E8), not a disc: the legend's own Open-gigs swatch is
+      // one, so on a mixed dot the two shoulder badges read apart by shape and
+      // not by colour alone. NO approximate variant — see makeBadgeImages.
+      'icon-image': 'gs-badge-amber',
+      'text-field': ['to-string', ['get', 'gigs']],
+      'text-size': 10,
+      'text-font': ['Noto Sans Bold'],
+      // The OTHER shoulder: TL, where the cyan events badge owns TR. On a mixed
+      // dot both are drawn at once, which is what the dot arm's larger standoff
+      // inside badgeOffsetExpr exists for.
+      'icon-offset': ["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"dot"],["literal",[-11.313708498984761,-11.313708498984761]],["step",["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"creator"],["get","people"],["get","events"]],["literal",[-12.727922061357857,-12.727922061357857]],25,["literal",[-16.970562748477143,-16.970562748477143]],100,["literal",[-21.213203435596427,-21.213203435596427]]]],
+      'text-offset': ["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"dot"],["literal",[-1.131370849898476,-1.131370849898476]],["step",["case",["==",["case",[">=",["get","people"],5],"creator",[">=",["get","events"],5],"event","dot"],"creator"],["get","people"],["get","events"]],["literal",[-1.2727922061357857,-1.2727922061357857]],25,["literal",[-1.6970562748477143,-1.6970562748477143]],100,["literal",[-2.121320343559643,-2.121320343559643]]]],
+      'icon-allow-overlap': true,
+      'text-allow-overlap': true,
+      'icon-ignore-placement': true,
+      'text-ignore-placement': true,
+    },
+    paint: {
+      // DARK ink on the solid amber: 9.15:1, where white is 2.15:1. Pinned by
+      // tests/theme-contrast.test.ts, which measures mapDemandAmber and NOT the
+      // colors.gold CTA fill its neighbouring arm measures — near neighbours by
+      // eye, different hexes, and only one of them is this surface.
+      'text-color': C.bg,
+      'icon-opacity': 1,
+      'text-opacity': 1,
+    },
+  });
+  // THE GL-ONLY REGIME (spec §3.6). Past EVENT_DOM_LIMIT no event pills are
+  // built at all, so this layer is a singleton event's ONLY visible form. It is
+  // therefore the one layer here BORN AT 0 and NOT driven by applyAggMode's
+  // seam pair: the mode cannot decide its visibility, because the pill it hands
+  // over to does not exist in that regime. setEventGl owns it instead, from the
+  // same count that decides whether pills are built — one setter, one count,
+  // both decisions, so pills and dots can never coexist.
+  map.addLayer({
+    id: 'event-points', type: 'symbol', source: 'creators',
+    filter: ['all', ['!', ['has', 'point_count']], ['==', ['get', 'kind'], 'event']],
+    layout: {
+      'icon-image': ['case', ['==', ['get', 'precise'], false], 'gs-event-dot-approx', 'gs-event-dot'],
+      // ZERO-CREW FACE (spec 2026-08-26 Z3): no digit at all at zero — a '0' on
+      // a pin reads as dead, and the popup carries the story instead. An empty
+      // text-field still draws the icon.
+      'text-field': ['case', ['>', ['get', 'goingCount'], 0], ['to-string', ['get', 'goingCount']], ''],
+      'text-size': 10,
+      'text-font': ['Noto Sans Bold'],
+      // NO offset: the digit sits ON the dot, exactly as cluster-count sits on
+      // its bubble. The offsets above exist because a BADGE annotates a circle
+      // it is not the centre of.
+      'icon-allow-overlap': true,
+      'text-allow-overlap': true,
+      'icon-ignore-placement': true,
+      'text-ignore-placement': true,
+    },
+    paint: {
+      'text-color': C.cyanInk,
+      'icon-opacity': 0,
+      'text-opacity': 0,
+    },
+  });
+  // The seam's six layers are BORN VISIBLE (above — event-points is the one
+  // exception, and applyAggMode does not own it), but they are created AFTER the
+  // mode was already decided — applyAggMode's paint step bails while there is no source —
+  // so re-run the decision now that there is something to paint. The case this
+  // catches is a birth in PINS mode (the camera already above the seam, e.g. on
+  // exit from the location picker): without this the fresh layers would sit
+  // fully drawn under the DOM pins until some later zoomend. Born-visible plus
+  // this call also means the >DOM_MARKER_LIMIT first push needs no repaint at
+  // all — the birth values already ARE its state. Idempotent either way: the
+  // latch inside makes a no-op call free.
+  applyAggMode();
+  const onClusterTap = (e) => {
+    // Paint is not interactivity (spec §2.1): an opacity-0 GL feature is STILL
+    // hit-testable, so above the seam this handler would swallow taps meant for
+    // the real DOM pin drawn over it. The mode flag owns which side accepts a
+    // tap; the same guard is on every GL handler below.
+    if (aggMode !== 'bubbles') return;
+    // The features MapLibre ALREADY hit-tested for this tap, not a second query
+    // for the same pixel: a layer-delegated handler (map.on(type, LAYER, fn))
+    // only fires when that layer was hit, and maplibre hands the hits over on
+    // the event — the sibling points handler below has always read e.features
+    // this way. Re-querying re-runs the same hit test and can disagree with the
+    // one that dispatched us. The guard below is defensive only.
+    const f = e.features[0];
+    if (!f) return;
+    const src = map.getSource('creators');
+    // Target the CENTRE OF THE CLUSTER'S ACTUAL CHILDREN, not the queried cluster
+    // geometry: that geometry is zoom-DEPENDENT (supercluster re-derives a
+    // cluster's position per zoom level), so easing to it lands the expanded view
+    // off-centre or against the viewport edge — maplibre discussion 5867,
+    // maintainer-confirmed. ONE combined centre+zoom easeTo reads as smooth;
+    // flyTo's arc is gratuitous at this travel distance and can land on a
+    // NON-INTEGER zoom that leaves the cluster still merged — the "tap does
+    // nothing" bug (mapbox-gl-js #6191 / #9707). No 'essential' flag ON PURPOSE:
+    // a reduced-motion user gets the instant jump maplibre gives them for free
+    // (spec §2.5) — do not "fix" this by adding it.
+    //
+    // ONE MOVE PER TAP, WHATEVER ASYNC SHAPE THE SOURCE HAS. Both lookups below
+    // are handed a callback AND have their returned promise chained, because the
+    // two documented shapes disagree: the vendored maplibre 5 returns a promise
+    // and drops the callback on the floor, the older/typed API calls the
+    // callback and returns nothing. A source that honoured BOTH would run each
+    // level twice — four easeTos on a single tap, i.e. a camera that overshoots
+    // and snaps back. That is unreachable on the vendored maplibre 5.24, but a
+    // major upgrade is exactly the kind of change that flips it silently and
+    // shows up only as a jittering camera on a phone. So the latch is
+    // shape-INDEPENDENT: it does not bet on which arm the installed maplibre
+    // takes, it guarantees the first arm to arrive is the only one that acts.
+    let went = false;
+    const go = (zoom) => {
+      if (went) return;
+      went = true;
+      // A cluster that cannot expand should be unreachable (the golden-angle
+      // scatter separates identical display coords, see scatterColliding), so
+      // this is a belt-and-braces guard on an IMPOSSIBLE value. The ceiling is
+      // DERIVED, not chosen: getClusterExpansionZoom cannot exceed
+      // clusterMaxZoom + 1, so the 17 below is the SAME number as the source
+      // option above, interpolated from the one CLUSTER_MAX_ZOOM const in
+      // src/lib/mapHtml.ts (its doc comment carries the arithmetic). Anything
+      // above the ceiling — or a NaN arriving from the rejection arm below —
+      // means the lookup failed. Step in rather than let the tap do nothing, and
+      // say so where a phone debugger can see it.
+      const ok = Number.isFinite(zoom) && zoom <= 17 + 1;
+      if (!ok) console.warn('gs: cluster expansion fallback', zoom);
+      // A new binding, never a write back into the parameter: reassigning zoom
+      // would make the value logged above and the value used below the same
+      // name with two meanings.
+      const target = ok ? zoom : map.getZoom() + 2;
+      // The same one-shot latch, one level down and scoped per go() call: the
+      // leaves lookup carries the identical dual shape, so it needs the identical
+      // guarantee. Two latches, not one, because either level can double alone.
+      let landed = false;
+      const leavesDone = (leaves) => {
+        if (landed) return;
+        landed = true;
+        let center = f.geometry.coordinates;
+        if (leaves && leaves.length) {
+          let sx = 0, sy = 0;
+          for (const l of leaves) { sx += l.geometry.coordinates[0]; sy += l.geometry.coordinates[1]; }
+          center = [sx / leaves.length, sy / leaves.length];
+        }
+        pmove(() => map.easeTo({ center, zoom: target, duration: 500, easing: (t) => t * (2 - t) }));
+      };
+      // Dual shape, same as getClusterExpansionZoom below: maplibre 5 returns a
+      // promise, the documented/older API takes a callback. Honour both, and let
+      // ANY failure fall through to the queried geometry rather than no move.
+      const lr = src.getClusterLeaves(f.properties.cluster_id, Infinity, 0, (err, leaves) => {
+        leavesDone(err ? null : leaves);
+      });
+      if (lr && lr.then) lr.then(leavesDone, () => leavesDone(null));
+    };
+    // Both arms of the promise, for the same reason the leaves call above has
+    // both: a rejection with no handler is an unhandled rejection AND a dead
+    // tap — precisely the failure the fallback exists to prevent. NaN routes
+    // through go's guard, so a failed lookup still warns and still moves.
+    const result = src.getClusterExpansionZoom(f.properties.cluster_id, (err, zoom) => { if (!err) go(zoom); });
+    if (result && result.then) result.then(go, () => go(NaN));
+  };
+  // ONE DELEGATED LISTENER over the three cluster layers (spec §3.5), via the
+  // layer-ARRAY overload. Never three registrations: those build three
+  // independent delegates, and a tap that hits a badge hits its bubble too, so
+  // the handler would fire twice and break this block's own one-move-per-tap
+  // invariant.
+  //
+  // The merged e.features is ordered TOP LAYER FIRST, so on a badge hit
+  // e.features[0] IS the badge's own cluster feature — "the badge wins a
+  // two-cluster hit" costs no code at all, and two overlapping badges resolve
+  // the same way (top layer, then source order).
+  map.on('click', ['clusters', 'cluster-events', 'cluster-people', 'cluster-gigs'], onClusterTap);
+  map.on('click', 'points', (e) => {
+    if (aggMode !== 'bubbles') return; // same gate as the clusters handler above
+    const p = e.features[0].properties;
+    const popup = new maplibregl.Popup({ offset: 14, closeButton: false, maxWidth: '250px', className: 'gigshot-popup' })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(popupCard(p))
+      .addTo(map);
+    markPopupOpen(popup); // closes any prior + arms the click-outside guard
+    // Bind View-profile via a closure, exactly as makeMarker does — popupCard
+    // renders the button with NO inline onclick on purpose, and until now this
+    // GL path never bound it, so below the seam the card's only CTA was dead.
+    // Bound AFTER .addTo(map): getElement() is null before the popup is in the
+    // DOM (makeMarker binds inside popup.on('open') for the same reason — its
+    // popup is attached to a marker and opened later).
+    //
+    // p here is e.features[0].properties, i.e. the GeoJSON properties of the
+    // point (toGeoJSON passes a realm-rebuilt copy of the whole MapPoint). Those make a
+    // round trip through maplibre's tile encoding, which keeps string / number /
+    // boolean values as-is, DROPS null and undefined ones (so an absent
+    // availLabel/via/lastActiveLabel is simply missing, which popupCard already
+    // treats as falsy) and JSON-stringifies anything else. MapPoint was flat
+    // scalars ONLY until 0183 added 'offerings' (an array), which therefore
+    // arrives here as a JSON STRING — nothing in this shell reads it, it rides
+    // the pin purely for the HOST's client-side service filter, so nothing
+    // popupCard touches is reshaped. Anything else added to MapPoint must stay a
+    // scalar or be read back through JSON.parse. id is a string, and is the diff
+    // key besides, so it always survives.
+    const pel = popup.getElement();
+    const btn = pel && pel.querySelector('.gs-view-profile');
+    if (btn) btn.onclick = () => window.notify({ type: 'creator', id: p.id });
+    popup.on('close', () => { if (openPopup === popup) openPopup = null; });
+  });
+  // THE GL EVENT DOT'S CARD (spec §3.6). Past the DOM limit this is the only
+  // card an event has, so it must be the SAME card the pill shows — which it is
+  // by construction: eventPopupHtml is one function with two callers.
+  map.on('click', 'event-points', (e) => {
+    // TWO terms, not one (Task 5, closing the residual Task 4 recorded here).
+    // The mode gate is the one every GL handler carries. The LATCH term is this
+    // layer's own: its visibility is owned by setEventGl (the COUNT), not by the
+    // mode, so BELOW the DOM limit an event is drawn as a DOM pill while an
+    // invisible-but-still-hit-testable dot sits underneath it (opacity never
+    // gates hit-testing). A tap on that pill in bubbles mode used to reach BOTH,
+    // building two popups per tap — the same card either way, since both render
+    // eventPopupHtml, and markPopupOpen closed the first, but twice the work and
+    // a visible flicker. "Pills and dots never coexist: one setter, one count,
+    // both decisions" (spec §3.6) is now true of the TAP as well as the paint.
+    if (aggMode !== 'bubbles' || !eventGlApplied) return;
+    const p = e.features[0].properties;
+    const popup = new maplibregl.Popup({ offset: 14, closeButton: false, maxWidth: '250px', className: 'gigshot-popup' })
+      .setLngLat(e.features[0].geometry.coordinates)
+      .setHTML(eventPopupHtml(p))
+      .addTo(map);
+    markPopupOpen(popup); // closes any prior + arms the click-outside guard
+    // p is the tile's copy of the PROJECTED event properties (see
+    // refreshClusterSource). The round trip keeps string / number / boolean
+    // values as-is and DROPS null and undefined ones, so whenLine/crewBand
+    // arrive MISSING rather than null — which eventPopupHtml already treats as
+    // falsy, exactly as popupCard treats an absent availLabel.
+    //
+    // Bound AFTER .addTo(map): getElement() is null before the popup is in the
+    // DOM. By closure, never an interpolated onclick string — a place key is a
+    // server slug today, and an HTML attribute plus a JS string is a double
+    // context that entity-decodes before the JS parses.
+    const pel = popup.getElement();
+    const btn = pel && pel.querySelector('.gs-event-going');
+    if (btn) btn.onclick = () => window.notify({ type: 'event', placeKey: p.placeKey });
+    popup.on('close', () => { if (openPopup === popup) openPopup = null; });
+  });
+  // ONE hover owner for the canvas cursor (flicker fix, 2026-07-29).
+  //
+  // This used to be four delegated enter/leave handlers writing one shared
+  // cursor slot. MapLibre gives EACH delegate its own private mousein latch,
+  // so the two layers fought: sweeping from a bubble onto an overlapping dot
+  // fired 'mouseleave clusters' (cursor cleared) while the points latch was
+  // ALREADY true, so its 'mouseenter' never re-fired and the pointer never came
+  // back. Worse, mouseout BUBBLES: every Marker is appended to the canvas
+  // container, so brushing any DOM pin/event pill reset all four latches at
+  // once. Measured on prod during one smooth sweep across the Luxembourg
+  // cluster: pointer, grab, pointer, grab, pointer, grab.
+  //
+  // The overlap that triggers it is by design (clusterMinPoints 5 leaves
+  // sub-dignity singletons painting as dots WHILE bubbles are up), and it only
+  // went live today: before the z6 seam, ≤60 points pushed setClusterData([]),
+  // so the cluster source was empty and all four handlers were dead code.
+  //
+  // Now: one mousemove, ONE query across both layers, and a write only when the
+  // value actually changes — so a redundant write can never restart the churn.
+  // The mode gate lives in the single decision instead of being split across a
+  // gated enter and an ungated leave (which is what made the writers asymmetric).
+  let cursorNow = '';
+  const wantCursor = (v) => {
+    if (v === cursorNow) return;
+    cursorNow = v;
+    map.getCanvas().style.cursor = v;
+  };
+  map.on('mousemove', (e) => {
+    // Bubbles mode only: above the seam the DOM pins carry their own cursor,
+    // and these GL circles are invisible-but-still-hit-testable (opacity never
+    // gates hit-testing), so a pointer there promises a target that is not there.
+    if (aggMode !== 'bubbles') { wantCursor(''); return; }
+    // Every tappable GL layer (spec §3.3): the two circle layers and both
+    // badges, always. Without the badges the ~11px of badge overhanging its
+    // circle is tappable with no pointer cursor, i.e. a target the map refuses
+    // to admit exists.
+    //
+    // 'event-points' joins the query only while the LATCH is on, and the array
+    // is BUILT from the latch so the cursor and the tap gate above cannot drift.
+    // Below the DOM limit that dot is invisible and sits under its own DOM pill:
+    // querying it would promise a pointer over a target that is not there
+    // (the pill carries its own cursor), which is the same defect the mode gate
+    // above exists to prevent, one latch over.
+    const hoverLayers = ['clusters', 'points', 'cluster-events', 'cluster-people', 'cluster-gigs'];
+    if (eventGlApplied) hoverLayers.push('event-points');
+    wantCursor(map.queryRenderedFeatures(e.point, { layers: hoverLayers }).length ? 'pointer' : '');
+  });
+  // Leaving the canvas entirely (including onto a sibling DOM marker, which
+  // carries its own cursor) resets to the container's grab.
+  map.on('mouseout', () => wantCursor(''));
+}
+
+// ONE SOURCE, THREE KINDS (spec §3.1, widened by the demand-union spec §2.1).
+// This replaces setClusterData and keeps both
+// of its jobs — the ensureClusterLayers call that creates the source on first
+// use, and the signature short-circuit — but it now feeds the source the UNION
+// of the current supply points, the current event points and the current open
+// gigs, so a creator, an event and a request standing in the same city cluster
+// TOGETHER instead of stacking three independent markers on one spot.
+//
+// It reads POINTS, EVENT_POINTS and DEMAND_POINTS rather than taking arguments,
+// deliberately: every caller assigns its own array FIRST and then refreshes, so
+// there is no way to push part of a union.
+function refreshClusterSource() {
+  ensureClusterLayers();
+  // CREATORS keep every MapPoint property, plus kind STAMPED HERE. Stamped
+  // rather than defaulted by the aggregate expression: a missing kind would
+  // silently undercount, and the host has no business knowing this source
+  // exists. They go through the EXISTING toGeoJSON realm rebuild (see its own
+  // comment) because MapPoint has not been flat since 0183's offerings array,
+  // and one host-realm object anywhere in a setData payload makes the worker
+  // serializer throw while the source silently keeps stale data.
+  const creators = toGeoJSON(POINTS.map(p => Object.assign({}, p, { kind: 'creator' })));
+  const sigs = [];
+  for (const p of POINTS) sigs.push('creator|' + p.id + '@' + p.lng + ',' + p.lat);
+  // EVENTS are PROJECTED, never passed through: exactly the properties below
+  // reach the tile, and never a person. The event pins spec's paywall seam holds
+  // here too - an attendee name that arrived on the host object cannot leak into
+  // a GL feature that anon eyes can query. Built as a fresh shell-realm literal
+  // of scalars, which is its own realm safety (no round-trip needed).
+  const events = [];
+  // THE UNION HALF OF THE EVENTS_IN_SOURCE LEVER (spec §8.2). Read HERE, not
+  // only at applyAggMode's call site and the pill-build gate: with the lever off
+  // and this loop still running, the mode gate went inert and pills were built
+  // unconditionally WHILE the aggregate arm stayed fully live - every pill built
+  // AND folded into clusters that still carried badges, which is worse than
+  // either endpoint and is the arm reached for during an incident. Off, no
+  // cluster can reach events >= 1, so refold() folds nothing on its own.
+  // The signature's EVENT_POINTS.length prefix stays outside the gate: it can
+  // only cause a redundant re-push, never a stale one.
+  if (EVENTS_IN_SOURCE) for (const e of EVENT_POINTS) {
+    // A coordless event is DROPPED, never projected with a NaN geometry. The
+    // asymmetry with the DOM pill loop (which skips the same way) is deliberate
+    // and the blast radius is why: a skipped pill costs one missing marker,
+    // while ONE NaN coordinate in a setData payload invalidates the WHOLE
+    // FeatureCollection - maplibre's worker keeps the previous data and the
+    // source silently goes stale, the same class toGeoJSON's realm scar records.
+    // Unreachable today - the host's pin builder in src/lib/event-pins.ts drops
+    // an unplaceable event before it can be pushed. This is the tripwire for the
+    // day that stops being true. (That builder is named WITHOUT its call paren
+    // on purpose: tests/event-pins.test.ts's one-caller rule counts the name
+    // plus a paren textually across src/, and a comment would read as a caller.
+    // No backticks either - this comment is inside the shell template literal,
+    // and one backtick anywhere in it terminates the literal.)
+    if (typeof e.lng !== 'number' || typeof e.lat !== 'number') continue;
+    const props = {
+      kind: 'event',
+      id: e.placeKey, // the union's identity field: an event IS its place key
+      placeKey: e.placeKey,
+      name: e.name,
+      nearCity: e.nearCity,
+      goingCount: e.goingCount,
+      gigCount: e.gigCount,
+      precise: e.precise,
+      whenLine: e.whenLine,
+      datesUnconfirmed: e.datesUnconfirmed,
+      crewBand: e.crewBand,
+      lat: e.lat,
+      lng: e.lng,
+    };
+    events.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [e.lng, e.lat] }, properties: props });
+    // EVERYTHING the GL layers and the GL popup read off the tile, in a fixed
+    // order - not only identity. Keying an event on two fields left the popup's
+    // other six stale past the DOM limit, where the tile IS the only copy: a
+    // going count that changed while the key did not simply never re-pushed.
+    // So any event refresh re-pushes the whole union (and re-clusters the
+    // creators with it: ~700 features, milliseconds, the price of a correct
+    // GL digit) while a creator refresh with unchanged identity still does not.
+    sigs.push('event|' + props.id + '@' + props.lng + ',' + props.lat + '|' + [
+      props.placeKey, props.name, props.nearCity, props.goingCount, props.gigCount,
+      props.precise, props.whenLine, props.datesUnconfirmed, props.crewBand,
+    ].join('|'));
+  }
+  // GIGS are projected IDENTITY-ONLY (demand-union spec E7): kind, id and the
+  // coordinate, and NOTHING else - not the gig's label, not the poster's name.
+  // With the GL gig layer cut (E5) nothing anywhere reads a gig field off a tile,
+  // so a richer feature would have no reader at all; and since anything on a tile
+  // is queryable by anon eyes, projecting only identity makes the parent wave's
+  // paywall rule true BY CONSTRUCTION here rather than by policy. The poster's
+  // name still reaches the DOM badge's popup, which is host-side and never a
+  // tile property.
+  const gigs = [];
+  // THE UNION HALF OF THE DEMAND_IN_SOURCE LEVER (demand-union spec §2.6), read
+  // HERE for the reason the event loop above states about its own: a lever read
+  // at only some of its sites leaves the aggregate arm live while the rest of the
+  // wave believes it is off. E5 cut the count-gate term and the GL layer, so this
+  // loop is the lever's ONLY site and switching it off restores exactly today's
+  // demand layer. The signature's DEMAND_POINTS.length prefix stays outside the
+  // gate: it can only cause a redundant re-push, never a stale one.
+  if (DEMAND_IN_SOURCE) for (const g of DEMAND_POINTS) {
+    // Belt and braces, exactly as the event loop above: buildDemandPoints already
+    // drops a coordless gig host-side, and ONE NaN coordinate in a setData
+    // payload invalidates the WHOLE FeatureCollection while the source silently
+    // keeps stale data. This is the tripwire for a caller that does not drop it.
+    if (typeof g.lng !== 'number' || typeof g.lat !== 'number') continue;
+    const props = { kind: 'gig', id: g.id, lat: g.lat, lng: g.lng };
+    gigs.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [g.lng, g.lat] }, properties: props });
+    // IDENTITY ALONE keys a gig - the whole opposite of the event half above, and
+    // for the same reason it is: the signature must cover everything a GL surface
+    // reads off the tile, and for a gig that is exactly kind, id and coordinate.
+    sigs.push('gig|' + props.id + '@' + props.lng + ',' + props.lat);
+  }
+  // Skip a redundant setData: a small pan that keeps the SAME points in view
+  // still re-queries and re-pushes; re-setting an identical FeatureCollection
+  // needlessly recomputes clusters (and, pre-fadeDuration:0, re-faded the count
+  // labels). Per-feature signatures join on a separator the per-property join
+  // above does not use, and the three counts prefix the whole string: this is a
+  // CHANGE DETECTOR, not an identity, and those two guards are what keep a
+  // value containing the separator from aliasing across a feature boundary.
+  const sig = POINTS.length + '/' + EVENT_POINTS.length + '/' + DEMAND_POINTS.length + ':' + sigs.join('~');
+  if (sig === lastClusterSig) return;
+  lastClusterSig = sig;
+  map.getSource('creators').setData({
+    type: 'FeatureCollection',
+    features: creators.features.concat(events, gigs),
+  });
+}
+
+// opts.fit === false keeps the current camera — used by every non-initial push
+// (a filter change) and pick-on-map, so re-pushing points never yanks the map
+// away from where the user just looked. Only the first load / city-focus fits.
+window.setPoints = function (pts, opts) {
+  POINTS = pts;
+  const fit = !opts || opts.fit !== false;
+  if (pts.length <= DOM_MARKER_LIMIT) {
+    // BOTH presentations are always fed (spec §2). This used to push [] to the
+    // cluster source, which left the low-zoom side EMPTY: the crossfade faded
+    // the pins out over nothing. The mode flag alone decides what is VISIBLE
+    // (applyAggMode's two flat paint states) and what is tappable; the data
+    // layer stays dumb and feeds both.
+    refreshClusterSource(); // POINTS was assigned above: the array first, then the union
+    syncMarkers(pts); // DIFF — keep existing pins in place (no jump/flicker)
+    if (fit) fitAll();
+    // A COUNT change alone can force the mode (the zoom listener would not
+    // fire), so re-evaluate at the end of BOTH branches — and then the SAME
+    // fixed order the settle listeners and setEventPoints keep (spec §3.1): a
+    // creator push changes the ANCHORS, so the pills and badges resting on them
+    // have to be re-folded and re-docked or they keep last push's placement.
+    applyAggMode();
+    refold();
+    dockPass();
+  } else {
+    // Above the DOM limit the DOM path is dropped entirely: 60+ emoji markers
+    // is the churn the GL path exists to replace, and the mode is count-forced
+    // to bubbles at every zoom anyway, so there is nothing for them to fade in to.
+    clearMarkers();
+    refreshClusterSource();
+    if (fit) fitAll();
+    applyAggMode();
+    refold();
+    dockPass();
+  }
+};
+
+// The demand-anchored context layer (Phase 3): render OPEN REQUESTS as AMBER
+// 📣 badges, VISUALLY DISTINCT from the green/purple supply pins, so the map
+// reads as "a scene" (demand present even when supply is thin) without ever
+// being mistaken for a bookable creator. These are simple, non-clustered, and
+// sit BELOW the supply markers in z-index. Robust to an empty array (just clears).
+window.setDemandPoints = function (pts, reducedMotion) {
+  // THE FIXED ORDER (spec §3.1, demand-union spec §2.1), every step of it
+  // load-bearing - the same order setEventPoints keeps, with the motion flag in
+  // front of it:
+  //   setReduceMotion FIRST and BEFORE the empty-array early return below,
+  //     deliberately: a push that CLEARS the demand layer still carries the
+  //     current motion preference, and this is the only channel the host has for
+  //     it (useMapFrame's pushDemandPoints types the argument as a plain boolean
+  //     and passes it on every call, including the empty one). Sets the seam's
+  //     .gs-rm as well as this layer's own pulse;
+  //   the ARRAY next, or the union refresh below reads the previous push;
+  //   the UNION then, and ALSO before the early return - an emptied demand layer
+  //     (the Open gigs tickbox) must reach the union, or hidden gigs keep forming
+  //     clusters and keep being counted by an amber badge;
+  //   applyAggMode after it. The count gate has no gig term (E5 cut it), so this
+  //     call cannot change the mode by itself today - it is here because it is
+  //     idempotent and because all four setters keeping ONE shape is what stops
+  //     the next person from having to work out which of them is the exception.
+  //     Do not "optimise" it away;
+  //   refold after the mode, since it branches on the mode the flip just set -
+  //     run before the flip it would unfold exactly what the flip folds;
+  //   dockPass LAST, because it skips folded satellites.
+  setReduceMotion(reducedMotion);
+  DEMAND_POINTS = pts || [];
+  refreshClusterSource();
+  applyAggMode();
+  for (const m of demandMarkers) m.remove();
+  demandMarkers = [];
+  if (!DEMAND_POINTS.length) {
+    // The dock pass reads demandMarkers and eventMarkers as the satellites'
+    // truth, so an EMPTY push has to reach it too: there is nothing left to
+    // un-dock (a removed marker took its latch with it), but the event pills
+    // that were sharing an anchor with these badges may now have a free slot.
+    // refold comes with it for the mirror reason: no gig has any form now, DOM
+    // or GL, so nothing may still be folded on their account.
+    refold();
+    dockPass();
+    return;
+  }
+  for (const pt of DEMAND_POINTS) {
+    if (typeof pt.lng !== 'number' || typeof pt.lat !== 'number') continue;
+    const el = document.createElement('div');
+    // THE FOLD BASE CLASS (demand-union spec §2.4), the event pill's .gs-event one
+    // kind over: it carries the transition list only, and the hidden state is
+    // .gs-folded, which refold() toggles. Set here, before any inline style below,
+    // for the reason the supply pins' own class is: the element must never exist
+    // un-classed for a frame. It goes on BESIDE the pulse below, never instead of
+    // it - the beacon survives on every DOM badge.
+    el.classList.add('gs-gig');
+    el.setAttribute('aria-label', 'Open gig');
+    el.textContent = '📣';
+    // Amber rounded badge, slightly translucent — clearly NOT a supply pin.
+    // Fill, border and glow all derive from C.amber (theme.ts mapDemandAmber) —
+    // one source for the whole demand family, so a token retune moves every
+    // amber surface at once.
+    el.style.cssText =
+      'display:flex;align-items:center;justify-content:center;' +
+      'width:30px;height:30px;border-radius:30%;box-sizing:border-box;' +
+      'background:' + rgbaOf(C.amber, 0.22) + ';border:2px solid ' + C.amber + ';' +
+      'font-size:15px;cursor:pointer;' +
+      'box-shadow:0 2px 10px ' + rgbaOf(C.amber, 0.45) + ';' +
+      // Demand is a recruiting signal — it must be SEEN, not hidden behind a
+      // supply pin at the same city. The marker is offset UP (below) so the badge
+      // floats above the city's supply pin; both stay visible. z-index above
+      // supply (1–3) but below an open popup (10).
+      'z-index:6;';
+    // Soft amber pulse: skipped when reduced motion is on. Reads the shell-global
+    // flag rather than the argument, so this layer and the seam can never
+    // disagree about the preference.
+    if (!reduceMotionFlag) el.classList.add('gs-pulse');
+    const popup = new maplibregl.Popup({ offset: 18, closeButton: false, maxWidth: '250px', className: 'gigshot-popup' })
+      .setHTML(
+        '<div style="width:210px;padding:12px 14px;font-family:system-ui,sans-serif">' +
+          '<div style="font-size:13px;font-weight:800;color:' + C.amber + '">📣 ' + esc(pt.label || 'Open gig') + '</div>' +
+          '<div style="font-size:12px;color:' + C.mutedStrong + ';margin-top:6px">' + esc(pt.posterName || 'Someone') + ' is looking. Tap to respond.</div>' +
+          '<button class="gs-respond" ' +
+            'style="margin-top:10px;width:100%;padding:8px;border:0;border-radius:8px;cursor:pointer;' +
+            'background:' + C.amber + ';color:#111;font-weight:800;font-size:13px">Respond</button>' +
+        '</div>'
+      );
+    // Route the demand popup through the shared tracker so click-outside closes it
+    // (and it never stacks with a supply card).
+    popup.on('open', () => {
+      markPopupOpen(popup);
+      // Bind Respond via a CLOSURE (pt.id captured) — never interpolate an id into
+      // an onclick string: an HTML-attribute + JS-string double context is the
+      // wrong place for HTML-entity escaping (the browser entity-decodes before
+      // the JS parses). pt.id is a server UUID today; the DOM listener removes the
+      // footgun regardless of the id source.
+      const pel = popup.getElement();
+      const btn = pel && pel.querySelector('.gs-respond');
+      if (btn) btn.onclick = () => window.notify({ type: 'demand', id: pt.id });
+    });
+    popup.on('close', () => { if (openPopup === popup) openPopup = null; });
+    // Anchor CENTER with no static pixel offset — a fixed offset is a fixed
+    // SCREEN distance, but the map projects a fixed GROUND distance per pixel
+    // that shrinks as you zoom in. At the default zoom (~3.4) a 30px nudge is
+    // 300-500km, which threw a Berlin badge out over the Baltic. Center anchor
+    // means the badge sits exactly on its coordinate at ANY zoom; the upward
+    // dodge (to clear a same-city supply pin) is applied only once we're at
+    // city scale, via demandZoomTick below.
+    //
+    // REVISED 2026-09-05 (spec 2026-09-05-map-pin-declutter §4.2): the zoom
+    // threshold above is replaced by dockPass, which offsets a badge ONLY when
+    // a same-ground creator glyph is actually under it and only by the distance
+    // that clears THAT glyph — so the dodge is earned per badge instead of
+    // switched on for all of them at z9. The scar stands unaltered because it
+    // is still the reason nothing here writes a standing offset (the figure it
+    // quotes is the low-zoom worst case; at 51°N the charter's geometry table
+    // puts the same 30px at ~140 km — either way it is a country, not a dodge).
+    // The threshold machinery is KEPT, alive only behind DOCK_SATELLITES ===
+    // false (spec §8.2), which is why it is not deleted here.
+    const m = new maplibregl.Marker({ element: el, anchor: 'center' })
+      .setLngLat([pt.lng, pt.lat])
+      .setPopup(popup)
+      .addTo(map);
+    // The dock pass's stable satellite id — the same job m._gsKey does on an
+    // event pill. It orders two badges sharing one pin by IDENTITY, so they
+    // never swap slots merely because the host re-pushed its array differently.
+    m._gsKey = pt.id;
+    // LEGACY, alive only behind the lever: with the dock pass on, a badge is
+    // born with NO offset and gets one only if dockPass finds it something to
+    // yield to. dockPass() at the end of this function is what applies it.
+    if (!DOCK_SATELLITES) m.setOffset(DEMAND_DODGE_ZOOM <= map.getZoom() ? [0, -30] : [0, 0]);
+    demandMarkers.push(m);
+  }
+  // LAST, after the whole set exists: refold decides which of these badges is
+  // inside a cluster and the pass places every VISIBLE satellite against every
+  // anchor in one sweep, so neither may run per marker.
+  refold();
+  dockPass();
+};
+
+// City-scale threshold: below this, demand badges sit exactly on their
+// coordinate (offset [0,0]) since a same-city supply-pin collision can't
+// happen at continent/country zoom anyway. At/above it, nudge the badge up
+// [0,-30] so it clears a same-city supply pin, mirroring the old fixed offset
+// but now scoped to the zoom level where 30px is actually a small, sane
+// screen distance instead of hundreds of km.
+//
+// REVISED 2026-09-05 (spec 2026-09-05-map-pin-declutter §8.2): SUPERSEDED by
+// dockPass, and KEPT ALIVE behind DOCK_SATELLITES === false so that flipping
+// the lever restores today's behaviour exactly — not "no dodge", which would
+// be a third behaviour nobody has ever seen. The const itself stays at top
+// level because setDemandPoints' own gated branch reads it; only the standing
+// listener is inside the lever, because a tick that rewrites every badge's
+// offset on a zoom threshold is precisely what the dock pass replaces.
+const DEMAND_DODGE_ZOOM = 9;
+if (!DOCK_SATELLITES) {
+  let lastDemandDodge = null;
+  map.on('zoomend', () => {
+    const dodge = map.getZoom() >= DEMAND_DODGE_ZOOM;
+    if (dodge === lastDemandDodge) return; // only repaint when the threshold is crossed
+    lastDemandDodge = dodge;
+    for (const m of demandMarkers) m.setOffset(dodge ? [0, -30] : [0, 0]);
+  });
+}
+
+// The EVENT layer: upcoming events (event_supply) drawn as CYAN 🎪 PILLS that
+// carry the going count on the pin itself. Three deliberate differences from the
+// two layers above, so an event can never be misread as a bookable creator or as
+// an open gig:
+//   shape  a wide pill, not a circle (creator) or a rounded square (demand);
+//   colour cyan, nowhere near the amber demand badge or the purple/green supply
+//          pins;
+//   glyph  🎪 plus a NUMBER, so it reads as a crowd, not as a person.
+// No pulse: the beacon animation is the demand layer's signature ("someone is
+// looking, respond"). An event is not a call to action, and reusing the pulse
+// would blur exactly the distinction this layer exists to make. That is also why
+// this takes no reducedMotion argument.
+// Counts only, no names of attendees: this pin sits on the free side of the
+// paywall seam, and the popup's only outbound move is into /place/{key}.
+// Robust to an empty array (just clears).
+window.setEventPoints = function (pts) {
+  // THE FIXED ORDER (spec §3.1), every step of it load-bearing:
+  //   the ARRAY first, or the union refresh below reads the previous push;
+  //   the UNION next, and BEFORE the empty early return - the same placement
+  //     setReduceMotion has in setDemandPoints, for the same reason: a [] push
+  //     (the Events tickbox) must reach the union, or hidden events keep
+  //     forming clusters and keep wearing badges;
+  //   applyAggMode THEN, because the mode is a function of the event count too
+  //     and the zoom listener will not fire for a count change (the empty arm
+  //     matters most: 130 events -> 0 must flip bubbles -> pins);
+  //   refold AFTER the mode, since it branches on the mode the flip just set -
+  //     run before the flip it would unfold exactly what the flip folds;
+  //   dockPass LAST, because it skips folded pills.
+  EVENT_POINTS = pts || [];
+  refreshClusterSource();
+  applyAggMode();
+  for (const m of eventMarkers) m.remove();
+  eventMarkers = [];
+  if (!EVENT_POINTS.length) {
+    // No event has any form now, DOM or GL, so the latch drops with the pills.
+    setEventGl(false);
+    refold();
+    dockPass();
+    return;
+  }
+  // THE PILL-BUILD GATE (spec §3.6). Past the limit the GL event dots are the
+  // event's only form, so no pills - and BOTH terms are read: with the union
+  // switched off there is no GL form at all, so gating the mode without gating
+  // the build here made every event past the limit vanish (round-5 B1).
+  // ONE setter, ONE count, both decisions: pills and dots never coexist.
+  // The loop below IS the whole gated body - refold/dockPass at the end of the
+  // function run either way, because a push past the limit still has to fold
+  // (nothing) and dock (the demand badges Task 6 adds).
+  const glOnly = EVENTS_IN_SOURCE && EVENT_POINTS.length > EVENT_DOM_LIMIT;
+  setEventGl(glOnly);
+  if (!glOnly) for (const pt of EVENT_POINTS) {
+    if (typeof pt.lng !== 'number' || typeof pt.lat !== 'number') continue;
+    const going = typeof pt.goingCount === 'number' ? pt.goingCount : 0;
+    // precise === false means the coordinate is area-scale, not a surveyed
+    // point - EITHER the near-city fallback centroid OR a picked place that is
+    // itself settlement-scale (city/town/village; see PLACE_KINDS in
+    // src/lib/event-pins.ts, rung 0), never the event's own precise ground
+    // either way. The 'near {nearCity}' popup line below stays honest in both
+    // cases, since nearCity is always the event's own declared city. The pin
+    // must then look inferred: a dashed border and a lighter fill, so an
+    // approximate placement never wears the same confident outline as a
+    // surveyed one.
+    const approx = pt.precise === false;
+    const el = document.createElement('div');
+    // THE FOLD BASE CLASS (spec §3.4). It carries the transition list only; the
+    // hidden state is .gs-folded, which refold() toggles. Set here, before any
+    // inline style below, for the reason the supply pins' own class is: the
+    // element must never exist un-classed for a frame.
+    el.classList.add('gs-event');
+    el.setAttribute(
+      'aria-label',
+      (pt.name || 'Event') + (going ? ', ' + going + ' going' : ', no crew yet') + (approx ? ', approximate location' : ''),
+    );
+    // textContent, NOT innerHTML: assigning text is itself the escaping, so
+    // esc() must not be used here (it would render a literal &amp;). esc() is
+    // for the popup's setHTML below, where the value really is parsed as markup.
+    // ZERO-CREW FACE (spec 2026-08-26-zero-attendance-layer Z3): at zero the
+    // pill is the bare glyph — a '0' on the pin reads as dead, and the popup
+    // carries the story ('No crew here yet' / 'Be the first' below).
+    el.textContent = going ? '🎪 ' + going : '🎪';
+    el.style.cssText =
+      'display:flex;align-items:center;justify-content:center;' +
+      'height:26px;padding:0 9px;border-radius:999px;box-sizing:border-box;' +
+      // Every cyan here derives from C.cyan (theme.ts mapEventCyan). The APPROX
+      // pair stays a pair: a lighter fill AND a translucent dashed border, so an
+      // inferred coordinate never wears a surveyed one's confident outline.
+      'background:' + rgbaOf(C.cyan, approx ? 0.14 : 0.22) + ';' +
+      'border:2px ' + (approx ? 'dashed' : 'solid') + ' ' + (approx ? rgbaOf(C.cyan, 0.65) : C.cyan) + ';' +
+      'color:#e6fbff;font-family:system-ui,sans-serif;font-size:12px;font-weight:800;' +
+      'line-height:1;white-space:nowrap;cursor:pointer;' +
+      'box-shadow:0 2px 10px ' + rgbaOf(C.cyan, approx ? 0.18 : 0.38) + ';' +
+      // Above the supply pins (1-3) so a city's event stays visible over its
+      // creators, but BELOW the demand badge (6): an open gig is someone waiting
+      // for an answer, which outranks context. Popups stay above all of it (20).
+      'z-index:5;';
+    // ONE CARD, TWO SURFACES (spec §3.6): the pill and the GL event dot render
+    // the SAME markup, because eventPopupHtml is one function with two callers.
+    // This used to compose a fromDate–toDate range inline; the event's dates are
+    // the PAGE's own strings now (whenLine / datesUnconfirmed / crewBand, D5),
+    // and nothing in this shell composes a second date line — the /scene scar.
+    const popup = new maplibregl.Popup({ offset: 18, closeButton: false, maxWidth: '250px', className: 'gigshot-popup' })
+      .setHTML(eventPopupHtml(pt));
+    popup.on('open', () => {
+      // Shared tracker: click-outside and ESC close this card, and it can never
+      // stack with a supply or demand card.
+      markPopupOpen(popup);
+      // Bind via a CLOSURE (pt.placeKey captured), never an interpolated onclick
+      // string: an HTML attribute plus a JS string is a double context that
+      // entity-decodes before the JS parses. A place key is a server slug today,
+      // and the DOM listener removes the footgun whatever it becomes.
+      const pel = popup.getElement();
+      const btn = pel && pel.querySelector('.gs-event-going');
+      if (btn) btn.onclick = () => window.notify({ type: 'event', placeKey: pt.placeKey });
+    });
+    popup.on('close', () => { if (openPopup === popup) openPopup = null; });
+    // anchor CENTER with NO setOffset. A pixel offset is a fixed SCREEN distance
+    // but a varying GROUND distance, which is how a 30px nudge once threw a
+    // Berlin badge into the Baltic at low zoom. Event pins need no dodge at all:
+    // same-coordinate events are separated host-side by scatterColliding.
+    //
+    // REVISED 2026-09-05 (spec 2026-09-05-map-pin-declutter): a pill now DOCKS
+    // (Task 6 - a pixel offset from a same-ground anchor, recomputed at every
+    // settle, never a standing offset on a marker) and FOLDS (this task - a
+    // class, when a cluster already draws its event). The scar above is exactly
+    // why neither of those moves the COORDINATE: the marker keeps sitting on
+    // pt.lng/pt.lat at every zoom, and the two passes only ever change how it is
+    // PRESENTED there.
+    const m = new maplibregl.Marker({ element: el, anchor: 'center' })
+      .setLngLat([pt.lng, pt.lat])
+      .setPopup(popup)
+      .addTo(map);
+    // The fold key: what refold() matches against a cluster's evkeys. Stamped on
+    // the marker, not looked up by index, because eventMarkers and EVENT_POINTS
+    // do NOT line up - a coordinate-less point is skipped above.
+    m._gsKey = pt.placeKey;
+    eventMarkers.push(m);
+  }
+  refold();
+  dockPass();
+};
+
+map.on('load', () => {
+  // FIRST, before anything can create a layer that names one of them: a symbol
+  // layer whose icon-image is missing draws no icon at all (spec §3.3). The
+  // layers are created by the setPoints push two lines down, via
+  // ensureClusterLayers.
+  makeBadgeImages(map);
+  retintMap(map);
+  window.setPoints(POINTS);
+  // Stated explicitly rather than left to setPoints' internals: the seam must
+  // have a decided mode before the first gesture, or the first zoomend is the
+  // one that creates it and the initial frame renders with neither side gated.
+  // Latched, so the (usual) case where setPoints already settled it is free.
+  applyAggMode();
+  window.notify({ type: 'ready' });
+});
+
+function boundsOf(pts) {
+  const b = new maplibregl.LngLatBounds();
+  for (const p of pts) b.extend([p.lng, p.lat]);
+  return b;
+}
+
+// See the trimOutliersJs doc comment in src/lib/mapHtml.ts for the full WHY.
+// Robust (median + median-distance) outlier trim for the auto-fit camera only.
+// It NEVER touches the rendered point set, only which points the camera frames.
+function trimOutliers(pts) {
+  if (!pts || !pts.length) return pts;
+  const fin = [];
+  for (const p of pts) {
+    if (Number.isFinite(p.lat) && Number.isFinite(p.lng)) fin.push(p);
+  }
+  // Too few points to tell an outlier from the distribution: leave it alone
+  // (return the ORIGINAL array so non-finite rows keep their previous handling).
+  if (fin.length < 8) return pts;
+  const med = function (xs) {
+    const s = xs.slice().sort(function (a, b) { return a - b; });
+    const h = s.length >> 1;
+    return s.length % 2 ? s[h] : (s[h - 1] + s[h]) / 2;
+  };
+  const mLat = med(fin.map(function (p) { return p.lat; }));
+  const mLng = med(fin.map(function (p) { return p.lng; }));
+  // Scale longitude by cos(lat) so a "degree" means the same ground distance on
+  // both axes (1 deg of longitude is ~62km at 55N vs ~111km at the equator).
+  // Near-pole guard mirrors map-scatter.ts.
+  const cosLat = Math.max(Math.cos(mLat * Math.PI / 180), 0.01);
+  const d = fin.map(function (p) {
+    const dy = p.lat - mLat;
+    const dx = (p.lng - mLng) * cosLat;
+    return Math.sqrt(dy * dy + dx * dx);
+  });
+  // The floor is 20 SCALED DEGREES (~2200km), not a tight number, and that is
+  // load-bearing: this trim exists ONLY to stop a poisoned coordinate (null
+  // island, swapped lat/lng, mid-Atlantic) from collapsing the initial fit to a
+  // hemisphere — it must NEVER drop an honest cohort. At floor 5 it did exactly
+  // that on our own launch geography: 15 Berlin + 4 Barcelona dropped all four
+  // Spanish creators from the first frame, so a Spaniard opened the app and
+  // their own country was out of view. Any honest intra-European set stays
+  // inside 20; all three poison vectors still trip it (null island ~52 scaled
+  // deg from a European mass, swapped lat/lng ~39, mid-Atlantic ~39).
+  const keepR = Math.max(med(d) * 6, 20);
+  const kept = [];
+  for (let i = 0; i < fin.length; i++) {
+    if (d[i] <= keepR) kept.push(fin[i]);
+  }
+  // Nothing was an outlier: hand the ORIGINAL array back, so the common case is
+  // free and identity-stable (same idiom as map-scatter.ts's "when nothing
+  // collides the input array is returned unchanged").
+  if (kept.length === pts.length) return pts;
+  // Dropping a lot means the data is genuinely spread out, not poisoned: fit it all.
+  if (kept.length < 3 || kept.length < fin.length * 0.75) return pts;
+  return kept;
+}
+
+
+// See the aggModeJs doc comment in src/lib/mapHtml.ts for the full WHY.
+const AGG_IN = 6.15;   // pins earned here (ONE number, interpolated from the TS const)
+const AGG_OUT = 5.85;  // bubbles earned only well BELOW it: the gap between the two IS the hysteresis
+function aggModeFor(prevMode, zoom, count, eventCount) {
+  // TWO count gates, one decision. The EVENT one exists because a clustered
+  // event's ONLY GL form is its cluster's circle and badge, which pins mode
+  // paints to 0: past the DOM limit no pills are built, so the mode MUST be
+  // bubbles or those events have no visible form at all. eventCount is
+  // OPTIONAL - an older three-argument call passes undefined, and
+  // undefined > n is false, so it never trips.
+  // EVENT_DOM_LIMIT is INTERPOLATED from the ONE TS const, exactly as AGG_IN is
+  // two lines above, and deliberately NOT comment-mirrored like the 60 below:
+  // the EVENT_DOM_LIMIT = Infinity revert lever (spec 8.2) has to be able to
+  // reach the term it names, and a comment cannot be reached.
+  if (count > 60 || eventCount > 120) return 'bubbles'; // DOM_MARKER_LIMIT: cluster-only at any zoom
+  if (prevMode !== 'bubbles' && prevMode !== 'pins') return zoom < 6 ? 'bubbles' : 'pins'; // 6 mirrors PHOTO_ZOOM (mapHtml.ts): kept in sync by comment only, same reason as the 60/DOM_MARKER_LIMIT pair, since this string is evaluated standalone in tests
+  if (prevMode === 'bubbles') return zoom >= AGG_IN ? 'pins' : 'bubbles';
+  return zoom <= AGG_OUT ? 'bubbles' : 'pins';
+}
+
+
+// See the dockJs doc comment in src/lib/map-dock-js.ts for the full WHY.
+// Self-contained on purpose: this string is evaluated standalone in node:test
+// and interpolated into the shell, so it may reference nothing from either scope.
+const BADGE_R_PX = 9;
+const RIM_STROKE_PX = 2;
+const SLOT_ANGLES = {"T":90,"TR":45,"TL":135,"BR":-45,"BL":225,"B":270};
+const EVENT_SLOTS = ["TR","BR","BL","TL","B","T"];
+const DEMAND_SLOTS = ["T","BL","BR","TL","TR","B"];
+
+// djb2, the same string-hash idiom map-scatter.ts and profile-share.ts use.
+// COPIED, not imported (this string has no module scope) — it only needs to be
+// well-mixed and stable, not cryptographic.
+function djb2(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i += 1) h = (Math.imul(h, 33) ^ s.charCodeAt(i)) >>> 0;
+  return h >>> 0;
+}
+
+function haversineM(aLat, aLng, bLat, bLng) {
+  const toRad = Math.PI / 180;
+  const dLat = (bLat - aLat) * toRad;
+  const dLng = (bLng - aLng) * toRad;
+  const s = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+    + Math.cos(aLat * toRad) * Math.cos(bLat * toRad) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(s)));
+}
+
+// A box's real reach along the slot direction. A 48x26 pill at T extends 13 px,
+// not its 27 px half-diagonal, so the gap/overlap constants are honoured in
+// EVERY slot rather than only the diagonals (round-4 R3).
+function extentAlong(w, h, theta) {
+  return Math.abs((w / 2) * Math.cos(theta)) + Math.abs((h / 2) * Math.sin(theta));
+}
+
+function discsHit(x1, y1, r1, x2, y2, r2) {
+  return Math.hypot(x1 - x2, y1 - y2) < r1 + r2;
+}
+
+function dockLayout(input) {
+  const mode = input.mode;
+  const groundM = input.groundM;
+  const gapPx = input.gapPx;
+  const overlapPx = input.overlapPx;
+  // Local copy: step 6 appends promoted satellite-anchors, and the caller's
+  // array is never mutated.
+  const anchors = (input.anchors || []).slice();
+
+  // (1) A folded pill is not a satellite at all.
+  const live = (input.satellites || []).filter(function (s) { return !s.folded; });
+
+  // (2) Deterministic, input-order-independent order: every demand badge first
+  // (it is the smaller, more urgent glyph and owns the axial slots), then event
+  // pills, each by djb2(id) so no id text buys a permanent best slot.
+  const ordered = live.slice().sort(function (a, b) {
+    const ka = a.kind === 'gig' ? 0 : 1;
+    const kb = b.kind === 'gig' ? 0 : 1;
+    if (ka !== kb) return ka - kb;
+    const ha = djb2(String(a.id));
+    const hb = djb2(String(b.id));
+    if (ha !== hb) return ha - hb;
+    const ia = String(a.id);
+    const ib = String(b.id);
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
+  });
+
+  // A Map, never a plain object: anchor ids are member-derived strings (place
+  // keys, profile ids) and placed['constructor'] on an object literal returns a
+  // function, whose .push would throw and take the whole pass down.
+  const placed = new Map(); // anchor id -> [{ x, y, rad }] already docked there
+  const out = [];
+
+  for (let i = 0; i < ordered.length; i++) {
+    const s = ordered[i];
+    const halfDiag = Math.hypot(s.w, s.h) / 2;
+
+    // An unmeasurable box (the host read the element mid-transition and got
+    // NaN) would otherwise produce a NaN offset, which setOffset accepts and
+    // paints as a vanished marker. Stay put instead — the same doctrine as a
+    // full anchor: never a wrong placement. A coordinate-less satellite
+    // (NaN/undefined lat or lng) gets the identical treatment, and for the
+    // identical reason: it must never dock on pixels alone (see the ground-gate
+    // inversion below, which independently refuses it too — belt and braces).
+    if (
+      !Number.isFinite(halfDiag) ||
+      !Number.isFinite(s.x) ||
+      !Number.isFinite(s.y) ||
+      !Number.isFinite(s.lat) ||
+      !Number.isFinite(s.lng)
+    ) {
+      out.push({ id: s.id, dx: 0, dy: 0, anchor: null, slot: null });
+      continue;
+    }
+
+    // (3) Same-ground gate FIRST, then the screen test; nearest centre wins,
+    // ties broken by id so the winner never depends on array order.
+    //
+    // The comparison is written as "continue unless provably within range",
+    // never "continue if provably out of range": haversineM returns NaN for a
+    // non-finite anchor coordinate, and NaN compares false against anything —
+    // so the ORIGINAL "> groundM" form let a NaN distance sail through as
+    // "not greater", docking a same-PIXEL, different-ground (or coordinate-
+    // less) pair onto whichever pin sat nearest on screen. groundM arriving
+    // undefined failed the identical way (any distance "> undefined" is also
+    // false). The inverted form fails CLOSED in all three cases: an anchor
+    // with a non-finite lat/lng is never a candidate, and an undefined
+    // groundM admits no anchor at all.
+    let best = null;
+    let bestDist = Infinity;
+    for (let j = 0; j < anchors.length; j++) {
+      const a = anchors[j];
+      if (a.accepts !== 'all' && !(a.accepts === 'gig' && s.kind === 'gig')) continue;
+      if (!(haversineM(a.lat, a.lng, s.lat, s.lng) <= groundM)) continue;
+      const dist = Math.hypot(a.x - s.x, a.y - s.y);
+      const reach = mode === 'pins' ? a.r + halfDiag + gapPx : a.r + halfDiag;
+      if (dist >= reach) continue;
+      if (dist < bestDist || (dist === bestDist && best && String(a.id) < String(best.id))) {
+        best = a;
+        bestDist = dist;
+      }
+    }
+
+    if (!best) {
+      // Nothing under it: never moved (ADR-0024).
+      out.push({ id: s.id, dx: 0, dy: 0, anchor: null, slot: null });
+      // (6) ...but several same-ground pills with no creator anchor still need
+      // to stop stacking on each other: the first in order holds its ground and
+      // becomes the rest's anchor, with radius = its own half-height.
+      if (hasSameGroundPeer(ordered, s, groundM)) {
+        anchors.push({
+          id: s.id, x: s.x, y: s.y, r: s.h / 2,
+          lat: s.lat, lng: s.lng, badgeSlots: [], accepts: 'all',
+        });
+      }
+      continue;
+    }
+
+    // (4) First slot whose placed box clears the anchor's own badge and every
+    // satellite already docked there. The ceilings are whatever this sweep
+    // yields under the real boxes — never the list length.
+    const slots = s.kind === 'gig' ? DEMAND_SLOTS : EVENT_SLOTS;
+    const taken = placed.get(best.id) || [];
+    let chosen = null;
+    for (let k = 0; k < slots.length; k++) {
+      const name = slots[k];
+      const theta = (SLOT_ANGLES[name] * Math.PI) / 180;
+      const base = mode === 'pins' ? best.r + gapPx : best.r - overlapPx;
+      const d = base + extentAlong(s.w, s.h, theta);
+      const cx = best.x + d * Math.cos(theta);
+      const cy = best.y - d * Math.sin(theta); // y flipped: math -> screen
+      // (4a) The anchor's OWN furniture: every badge on its rim, not just one —
+      // the mixed dot carries a single TR count badge today, but a second
+      // (Task 3's amber one) sits at TL, and a slot must clear BOTH. bs is the
+      // anchor's OWN standoff when it gave one (the mixed dot's badges sit
+      // farther out than a plain bubble's — see DOT_BADGE_STANDOFF_PX's own
+      // comment for the arithmetic), else the rim-hugging RIM_STROKE_PX default.
+      const badgeSlots = best.badgeSlots || [];
+      const bs = Number.isFinite(best.badgeStandoff) ? best.badgeStandoff : RIM_STROKE_PX;
+      let badgeBlocked = false;
+      for (let bi = 0; bi < badgeSlots.length; bi++) {
+        const bt = (SLOT_ANGLES[badgeSlots[bi]] * Math.PI) / 180;
+        const bx = best.x + (best.r + bs) * Math.cos(bt);
+        const by = best.y - (best.r + bs) * Math.sin(bt);
+        if (discsHit(cx, cy, halfDiag, bx, by, BADGE_R_PX)) { badgeBlocked = true; break; }
+      }
+      if (badgeBlocked) continue;
+      let blocked = false;
+      for (let t = 0; t < taken.length; t++) {
+        if (discsHit(cx, cy, halfDiag, taken[t].x, taken[t].y, taken[t].rad)) { blocked = true; break; }
+      }
+      if (blocked) continue;
+      chosen = { name: name, cx: cx, cy: cy };
+      break;
+    }
+
+    // (5) No free slot: stay put. Never a wrong slot.
+    if (!chosen) {
+      out.push({ id: s.id, dx: 0, dy: 0, anchor: null, slot: null });
+      continue;
+    }
+    taken.push({ x: chosen.cx, y: chosen.cy, rad: halfDiag });
+    placed.set(best.id, taken);
+    out.push({
+      id: s.id,
+      dx: chosen.cx - s.x,
+      dy: chosen.cy - s.y,
+      anchor: best.id,
+      slot: chosen.name,
+    });
+  }
+  return out;
+}
+
+// Step 6's precondition: another VISIBLE satellite of the same kind, on the same
+// ground. Same-ground, not "one coordinate" — after the host's 950 m event
+// scatter these are metres apart, which the ground gate admits and the pixel
+// test then decides on.
+function hasSameGroundPeer(all, s, groundM) {
+  for (let i = 0; i < all.length; i++) {
+    const o = all[i];
+    if (o === s || o.kind !== s.kind) continue;
+    if (haversineM(o.lat, o.lng, s.lat, s.lng) <= groundM) return true;
+  }
+  return false;
+}
+
+// The auto-fit. trimOutliers keeps ONE poisoned coordinate from collapsing the
+// initial frame to a hemisphere; it is a no-op for small or genuinely wide sets.
+// maxZoom is CITY_ZOOM (was 12): the cap only bites for a tight/one-city set,
+// which is precisely the case where the scatter ring needs 12.5 to read as
+// separate pins rather than a smudge.
+function fitAll() {
+  const pts = trimOutliers(POINTS);
+  if (pts.length) pmove(() => map.fitBounds(boundsOf(pts), { padding: 70, maxZoom: CITY_ZOOM, duration: 900 }));
+}
+
+// City focus is derived from the data, not a hardcoded gazetteer: zoom to
+// the bounds of that city's creators, wherever they happen to be. That is also
+// why it needs the same outlier trim: the city STRING is a free distribution key
+// we never validate against a centroid, so a row claiming city='Berlin' with a
+// mid-Atlantic coordinate would otherwise permanently break the Berlin chip for
+// every viewer. Trimming the CAMERA (not the data) is the only fix compatible
+// with PLACE-ARCHITECTURE.md invariant #1.
+window.focusCity = function (city) {
+  if (!city) { fitAll(); return; }
+  const all = POINTS.filter(p => p.city === city);
+  if (!all.length) return;
+  const pts = trimOutliers(all);
+  if (pts.length === 1) {
+    pmove(() => map.flyTo({ center: [pts[0].lng, pts[0].lat], zoom: CITY_ZOOM, duration: 1100 }));
+  } else {
+    // maxZoom 13 is already above CITY_ZOOM, so a tight city ring is allowed to
+    // go one step closer than the global fit. Left as-is.
+    pmove(() => map.fitBounds(boundsOf(pts), { padding: 90, maxZoom: 13, duration: 1100 }));
+  }
+};
+
+// No viewport ('moved') emit any more: the map is a view, not a query, so camera
+// movement reports nothing to the host. (The old loop emitted the bbox on every
+// settle to drive "Search this area" / "Search as I move", both removed.)
+map.on('click', (e) => {
+  // Picker mode: a map click moves the draggable marker (and reports it). The
+  // discovery map has NO "search near here" pick any more — the viewport is the
+  // query — so a plain map click does nothing in browse mode.
+  if (pickerMarker) {
+    pickerMarker.setLngLat(e.lngLat);
+    window.notify({ type: 'picked', lng: e.lngLat.lng, lat: e.lngLat.lat });
+    return;
+  }
+  // Click on the map BACKGROUND with a card open → dismiss it (user control &
+  // freedom). popupJustOpened is true only for the same-tick opening click, so
+  // tapping a pin still opens its card; a later tap on empty map closes it.
+  if (openPopup && !popupJustOpened) openPopup.remove();
+});
+
+// Keyboard a11y (user control & freedom): ESC dismisses the open card, mirroring
+// the click-outside behaviour above for keyboard / screen-reader users. The cards
+// are closeButton:false, so without this there is no key-only way to dismiss them.
+document.addEventListener('keydown', function (e) {
+  if ((e.key === 'Escape' || e.key === 'Esc') && openPopup) openPopup.remove();
+});
+</script>
+</body>
+</html>
